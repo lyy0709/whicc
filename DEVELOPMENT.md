@@ -1,0 +1,473 @@
+# whicc — Development
+
+这份文档面向开发者：从源码运行、改 Python / Swift 源码、自己打包 `.app`。
+
+如果只是想用预编译好的 app，看 [README.md](README.md)。
+
+## 目录
+
+- [开发模式启动](#开发模式启动)
+- [CLI 参数](#cli-参数)
+- [项目结构](#项目结构)
+- [依赖](#依赖)
+- [日志与排查](#日志与排查)
+- [核心机制](#核心机制)
+- [路线图](#路线图)
+- [打包成 macOS .app](#打包成-macos-app)
+
+## 开发模式启动
+
+开发模式 = 自己起 Python 后端 + 自己 `swift run` 起 macui。适合改 Python 源码、调参数、看 stdout/stderr。
+
+```bash
+# 1. 启动 ASR 后端（whicc/ 根目录）
+python3 src/whicc.py --events-jsonl /tmp/whicc-out/events.jsonl ... &
+
+# 2. 启动翻译后端
+python3 src/translate_stream.py \
+    --events /tmp/whicc-out/events.jsonl \
+    --out-dir /tmp/whicc-out ... &
+
+# 3. 启动术语自学习（可选）
+python3 src/glossary_refresher.py &
+
+# 4. 启动字幕窗体（从 whicc/macui/ 跑）
+cd whicc/macui
+swift build
+swift run whicc-macui /tmp/whicc-out/events.jsonl \
+    --trans /tmp/whicc-out/translation_events.jsonl \
+    --glossary /path/to/whicc/src --x 0 --y 1 --w 70 --h 13
+```
+
+**macui 二进制名**：开发模式叫 `whicc-macui`，打包后叫 `whicc`（`/Applications/whicc.app/Contents/MacOS/whicc`）。
+
+**开发模式日志**（注意路径跟打包模式不一样，开发模式用 `/tmp/`）：
+
+```bash
+tail -f /tmp/whicc.log
+tail -f /tmp/translate-stream.log
+tail -f /tmp/macui.log           # 开发模式 macui 的 stderr
+tail -f /tmp/glossary-refresher.log
+```
+
+> 打包版用户**用不到**开发模式——双击 `.app` 即可，Swift 启动时 `BackendLauncher` 自动 fork 4 个 Python 子进程 + 写 banner 启动 ping。
+
+## CLI 参数
+
+### whicc.py (ASR)
+
+```
+--model <id>              ASR 模型 ID 或本地路径
+--mode streaming|batch    ASR 模式（默认 streaming）
+--language auto|en|zh     语言（auto 启用自动检测）
+--events-jsonl <file>     JSONL 事件输出路径（必须）
+--min-chunk-sec 2.0       最小 chunk 时长
+--max-chunk-sec 5.5       最大 chunk 时长
+--dual-model              双模型预加载模式（秒切但耗内存）
+--stats                   性能指标摘要
+```
+
+### translate_stream.py (翻译)
+
+```
+--events <file>           ASR 事件 JSONL 路径
+--out-dir <dir>           翻译输出目录
+--mode partial|final      partial=同声传译模式（推荐）
+--target-lang <lang>      目标语言（auto / Japanese / de / ...）
+--vllm-url <url>          主翻译节点 URL
+--vllm-fallback-url <url> 远端不通时的本机 fallback (默认 http://localhost:1234)
+--glossary <file>         术语表路径
+--events-jsonl <file>     (旧) 输出事件文件，已弃用
+```
+
+翻译节点配置走 `lang_config.json`（macui 设置 → 服务配置），4 个键：
+- `translation_url`：主 URL
+- `translation_fallback_url`：本机 fallback URL
+- `translation_enabled`：必须显式打开（默认 false）
+- `translation_model`：远端 LM Studio 加载的模型名
+
+### whicc-macui (字幕窗体)
+
+```
+whicc-macui <events-jsonl> [--trans <translation-jsonl>] [--glossary <dir>] [--x N] [--y N] [--w N] [--h N]
+```
+
+参数：
+- `<events-jsonl>` (位置参数)：ASR 事件 JSONL 路径
+- `--trans <file>`：翻译事件 JSONL 路径（可选）
+- `--glossary <dir>`：术语表目录（包含 `glossary.json` 和 `_glossary_control.json`）
+- `--x N --y N --w N --h N`：字幕窗体位置和大小
+
+### model_downloader.py (模型下载守护进程)
+
+`src/model_downloader.py` 是后台守护进程，由 BackendLauncher 启动。用户通过 macui UI
+下载模型时，UI 写 `/tmp/whicc-out/model_download_request.json`，守护进程读请求后
+调 `huggingface_hub.snapshot_download` 下载，进度写到 `model_download.jsonl` 供 UI
+订阅。一般**不需要手动调用**。
+
+如果需要手动管理本地模型（列出 / 清理），直接操作 `~/Library/Application Support/whicc/models/` 目录：
+
+```bash
+# 列出已下载
+ls ~/Library/Application\ Support/whicc/models/
+
+# 清理某个模型
+rm -rf ~/Library/Application\ Support/whicc/models/mlx-community--Qwen3-ASR-0.6B-4bit
+```
+
+### event_agent.py (事件识别)
+
+```bash
+python3 src/event_agent.py              # 识别事件
+python3 src/event_agent.py --confirm    # 用户确认后生成术语表
+python3 src/event_agent.py --clear      # 清除事件，恢复用户场景
+```
+
+## 项目结构
+
+```
+whicc/
+├── src/                       Python 后端
+│   ├── whicc.py               ASR 转录引擎（多后端 + 软最大值断句 + VAD）
+│   ├── translator_hy_mt2.py   翻译引擎（多语言 + 术语注入 + 防护 + 增量 + 观测）
+│   ├── translate_stream.py    翻译消费流（JSONL 监听 + 语言热切换 + 场景热切换 + 临时词库合并）
+│   ├── languages.py           33 种语言规范化（code / prompt_name / UI 标签）
+│   ├── event_agent.py         事件识别 Agent（两阶段 Hermes，临时术语表 + 场景）
+│   ├── glossary_refresher.py  自学习术语优化器（jieba + Hermes Agent）
+│   ├── model_downloader.py    模型下载守护进程（macui 通信）
+│   ├── model_state.py         模型状态兼容层（DEPRECATED_MODELS 修正老用户配置）
+│   ├── audio.py               音频采集（mic 走 sounddevice，system 走 audiotee subprocess）
+│   ├── config.py              共享配置（whicc.py / audio.py 协议常量）
+│   └── glossary.json          永久术语表
+│
+├── macui/                     SwiftUI 字幕窗体
+│   ├── Package.swift          Swift Package（macOS 26 SwiftUI）
+│   ├── Info.plist             Bundle 配置
+│   └── Sources/
+│       ├── main.swift         App 入口 + NSPanel + 事件监听
+│       ├── App/               窗口控制、快捷键监听、字幕面板
+│       │   ├── OverlayWindowController.swift
+│       │   ├── KeyMonitor.swift
+│       │   └── SubtitlePanel.swift
+│       ├── Models/            状态、事件、配置模型
+│       │   ├── OverlayState.swift
+│       │   ├── TranslationEvent.swift
+│       │   ├── LangConfig.swift
+│       │   ├── GlossaryState.swift
+│       │   └── EventAgentState.swift
+│       ├── Services/          后端服务封装
+│       │   ├── EventWatcher.swift
+│       │   ├── BackendShutdown.swift
+│       │   └── CaptionClipboard.swift
+│       ├── Components/        HUD、字幕、按钮、启动 banner 等
+│       ├── Settings/          设置窗体（术语 / 场景 / 事件 / 服务）
+│       ├── Theme/             颜色 / 字体 / 液态玻璃样式
+│       └── Views/             顶层视图（ContentView / HUDView / SubtitleStageView）
+│
+├── tools/                     离线评估和参数扫描工具
+│   ├── analyze_sweeps.py
+│   ├── backtest.py
+│   ├── latency_sweep.py
+│   ├── prompt_sweep.sh
+│   ├── sweep.py
+│   └── whicc_file_audio.py
+│
+├── project.yml                xcodegen 项目定义（打包用）
+├── whicc.xcodeproj            Xcode project（xcodegen 生成）
+├── requirements.txt           Python 依赖清单
+├── .vendor/audiotee           系统音频采集二进制（Swift）
+└── bin/build_audiotee.sh      audiotee 编译脚本
+```
+
+### macui 设计要点
+
+- macOS 26 SwiftUI：`Window` + `GlassEffectContainer` + `glassEffect()` + `ScrollPosition`
+- HUD：顶部居中、悬浮；非焦点 / 非 hover 时整组 `opacity(0)` + 不响应点击
+- 双语字幕：可现场切换"原文上 / 译文上"
+- 7 个 accent 颜色（White / Ice / Gold / Neon / Coral / Violet / Cyan），应用于字幕文字
+- 设置窗体：独立 `NSWindow`，macOS 26 `NavigationSplitView` 风格
+
+### macui 实现要点
+
+- **文件协议一致**：监听 `/tmp/whicc-out/events.jsonl` 和 `/tmp/whicc-out/*.json*`
+- **Models 完全自写**：内部的 `OverlayState` / `LangConfig` / `GlossaryState` / `EventAgentState` / `EventWatcher`
+- **Python 协议 0 改动**：macui 纯消费者，写 JSONL 由 Python 端决定
+- **进程生命周期**：macui 退出时 `BackendShutdown` 自动 SIGTERM 所有后端子进程
+
+## 依赖
+
+**生产 venv ~325MB**（精简后）。清单锁定在 [`requirements.txt`](requirements.txt)，按业务分组。
+
+### 装法
+
+```bash
+# 新机器
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+
+# 系统音频源（macOS）
+brew install portaudio
+
+# 字幕窗体
+cd macui && swift build
+```
+
+### 删除的依赖（1.2GB → 325MB，节省 73%）
+
+本轮精简统一翻译后端到 HTTP（vLLM / LM Studio），删除本地 transformers 加载路径：
+- `torch` (437MB) — 本地 transformers 翻译后端已删除，统一走 HTTP
+- `transformers` (101MB) — 同上
+- `sentencepiece` / `tokenizers` / `safetensors` / `numba` / `llvmlite` / `scipy` / `sympy` / `mpmath` / `networkx` — 间接依赖
+
+翻译只走 vLLM / LM Studio HTTP 后端，不再保留本地加载模型的能力。
+
+## 日志与排查
+
+打包版（双击 `.app`）的日志统一在 `/tmp/whicc-out/logs/`：
+
+```bash
+tail -f /tmp/whicc-out/logs/whicc.log                  # ASR 转录
+tail -f /tmp/whicc-out/logs/translate-stream.log       # 翻译
+tail -f /tmp/whicc-out/logs/glossary-refresher.log     # 术语自学习
+tail -f /tmp/whicc-out/logs/model-downloader.log       # 模型下载
+```
+
+macui 自身 stderr 写到 `/tmp/whicc-out/logs/whicc-stderr.log`。
+GUI 启动信息看 **Console.app → 你的 Mac → "whicc"**。
+
+### 翻译观测指标
+
+翻译日志每条 final 都会输出：
+
+```
+[translate] en→Simplified Chinese bad=False retry=False leak=False boiler=False echo=False 515ms
+[stream]    en→Simplified Chinese bad=False retry=False leak=False boiler=False echo=False 368ms
+```
+
+| 指标 | 含义 | 期望值 |
+|------|------|--------|
+| `bad` | 首轮输出是否异常（解释性前缀 / 脚本不匹配） | False |
+| `retry` | 是否触发了重试 | False |
+| `leak` | prompt 标签是否泄漏到输出（"待翻译文本"等） | False |
+| `boiler` | 模板前缀是否需要清理（"根据背景信息"等） | False |
+| `echo` | 上下文回显是否需要清理 | False |
+| 数字 | 翻译耗时（毫秒） | <1000ms |
+
+`bad=True` 超过 5% 说明需要调参；`leak=True` 频繁出现说明 prompt 要调整。
+
+```bash
+# 快速统计
+grep -c 'retry=True' /tmp/whicc-out/logs/translate-stream.log
+grep -c 'leak=True' /tmp/whicc-out/logs/translate-stream.log
+grep -c 'bad=True'  /tmp/whicc-out/logs/translate-stream.log
+grep -oP '\d+ms'    /tmp/whicc-out/logs/translate-stream.log | sort -n | tail -20
+```
+
+## 核心机制
+
+### 软最大值断句（4.6s）
+
+- 积累音频到 4.6s 时做一次快速 ASR
+- 检测到句末标点（`。！？.!?`）→ 在 35 字之后的位置切割
+- 没有句末标点但文字 > 35 字 → 用中间标点（`，、；：,;:`）切割（更严格：前半 ≥ 1.5s）
+- 找不到好的切割点 → 每 0.6s 重试 ASR（音频在增长，可能识别出新标点）
+- 没有标点 → 继续积累到 5.5s 硬切或静音提交
+- 切割后剩余音频重新开始计时
+
+### 自适应 chunk + 标点感知断句
+
+- 能量 VAD 检测语音，静音 0.4s 后提交
+- 上一句以句末标点结尾时，下一句 0.8s 就提交
+- 超过 5.5s 强制提交
+
+### 翻译防护
+
+- **prompt 泄漏清理**: 去掉输出开头的 "待翻译文本"、"source text" 等标签
+- **模板剥离**: 去掉 "根据背景信息，以下是翻译：" 等前缀
+- **上下文回声检测**: 翻译与上一句 45%+ bigram 重叠 → 回退无上下文翻译
+- **增量翻译**: 只翻译 ASR 新增的部分，不重翻整段
+- **坏输出重试**: 检测到异常输出自动重试一次（用 extra_instruction 加强约束）
+
+### 翻译 Prompt 架构
+
+- 所有语言无 system prompt，纯 user message
+- 中英互译用中文 prompt，其他语言用英文 prompt
+- 上下文格式：原文 + 译文配对（不只传译文）
+- 术语注入：官方示例格式（"A 翻译成 B"）
+- 场景描述注入到 prompt
+
+### 自学习术语库
+
+- jieba 提取候选术语
+- Hermes Agent 主动搜索术语
+- 按来源质量自动过期（Hermes 7 天、web 3 天、lm 1 天）
+- 用户可通过字幕窗体管理词库
+
+### 系统音频看门狗
+
+`whicc-audio` 进程 10 秒无数据自动重启。
+
+### 模型 warmup
+
+启动时对空音频推理一次，吸收 Metal kernel 编译延迟。
+
+## 路线图
+
+### P0 — 已完成
+
+- **翻译输出防护**：模板前缀剥离 + 上下文回声检测（45% bigram）+ 坏输出重试
+- **音频看门狗**：`whicc-audio` 10 秒无数据自动重启
+- **模型 warmup**：启动时空音频推理，吸收 Metal kernel 编译延迟
+- **标点感知断句**：句末标点结尾的句子 0.8s 就提交
+
+### P1 — 部分完成
+
+- ✅ **两遍校正**（Nemotron）：streaming + final 用 [56,13] 上下文窗口重新解码
+- ⏳ **VAD gating**：计划用 Silero VAD (`mlx-community/silero-vad`) 替换能量阈值，对低信噪比音频更稳
+- ⏳ **同声传译模式优化**：当前走 partial 增量翻译（边识别边译），后续基于 LLM 的语义断句替代标点断句，让中英交传 / 同传场景延迟更低、句意更连贯
+
+### P2 — 长期方向
+
+- **外置 Agent 词库优化**：把术语自学习能力外挂成独立 Agent，支持接入自己的 LLM（Claude / GPT / 本地模型）+ 自定义提取规则 + 对接外部知识库（Wikipedia / 公司 wiki）。当前 `glossary_refresher.py` 内置 Hermes Agent，会逐步把它做成可插拔
+- **Push-style streaming encoder**：重写 mlx-audio 内部流式编码器，支持真正的实时麦克风输入（目前是基于 chunk 的）
+- **Incremental mel spectrogram caching**：O(n²) → O(n)，长音频场景下延迟降一档
+- **Speaker diarization**：NVIDIA Sortformer v2.1，多人对话场景区分发言人
+
+## 打包成 macOS .app
+
+把整个 whicc 系统打包成单 `.app` bundle（含 Python 解释器 + 依赖 + 后端源码 + 图标），用户双击 `.app` 即可运行，无需先装 Python / venv / brew。
+
+### 快速打包（5 行）
+
+直接复制跑，xcodegen / venv-standalone 已 setup 过的话：
+
+```bash
+pkill -9 -f "Applications/whicc.app" 2>/dev/null
+xcodegen generate --spec project.yml --project .
+xcodebuild -project whicc.xcodeproj -scheme whicc -configuration Release -derivedDataPath build clean build
+rm -rf /Applications/whicc.app && cp -R build/Build/Products/Release/whicc.app /Applications/whicc.app
+open /Applications/whicc.app
+```
+
+> ⚠️ **xcodebuild 必须 `clean build`**，否则 preBuildScript 不重新跑，`.app` 里还是上次的旧 venv / 旧 `.icns`。
+>
+> 💡 **Dock 图标不刷新**：`killall Dock` 让 LaunchServices 重读 plist。
+>
+> 出问题再回来看下面"前置 / 一次性 setup / 每次打包"细节。
+
+### 前置（一次性）
+
+1. **Xcode 26**（macOS 26 SDK，MLX wheel 硬绑定 `macosx_26_0_arm64`）
+2. **Python 3.13**（`/opt/homebrew/bin/python3.13` 或 `python3.13` 在 PATH）
+3. **xcodegen**（`brew install xcodegen`）
+
+### 一次性 setup
+
+```bash
+cd /path/to/whicc
+
+# 1. 下载独立 Python 解释器 (25 MB, 无 homebrew 依赖 — 关键!)
+#    这个解释器是 self-contained，不依赖系统 Python.framework，
+#    打包出来的 .app 才能在没装 homebrew Python 的机器上跑。
+curl -sL -o /tmp/cpython-standalone.tar.gz \
+  "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.13.14+20260610-aarch64-apple-darwin-install_only_stripped.tar.gz"
+mkdir -p /tmp/python-standalone
+tar -xzf /tmp/cpython-standalone.tar.gz -C /tmp/python-standalone
+
+# 2. 基于独立 Python 建 venv-standalone/ (打包用)
+mkdir -p venv-standalone
+cp -R /tmp/python-standalone/python/* venv-standalone/
+./venv-standalone/bin/python3.13 -m ensurepip
+./venv-standalone/bin/pip install --no-cache-dir -r requirements.txt   # ~556M slim, 不含 torch/whisper
+
+# 3. 编译 audiotee (系统音频采集)
+./bin/build_audiotee.sh
+```
+
+> ⚠️ **必须用 python-build-standalone**，**不能**用 `python3 -m venv`（系统 Python）。
+> 后者会创建一个依赖 `/Library/Frameworks/Python.framework` 的 venv，
+> 打包出来的 `.app` 在没装 homebrew Python 的机器上会 crash（动态链接
+> Python framework 找不到）。
+>
+> 验证方法：`cat venv-standalone/pyvenv.cfg` 应该**没有** `home = /Library/Frameworks/...` 这行。
+
+> **venv 用 slim 的好处**：torch / mlx-whisper / accelerate 已从
+> `requirements.txt` 剔除（Nemotron ASR + Qwen3 走 mlx-lm，不需要它们）。venv-standalone
+> ~556M vs 全装 1.3GB。
+
+> **venv 已装过就不用重跑** — `pip install -r requirements.txt` 第二次跑会显示
+> "Requirement already satisfied"，几秒结束。
+
+### 每次打包（详细版）
+
+跟"快速打包（5 行）"等价，只是多了 dev 残留清理 + 大小校验 + 后台启动备选：
+
+```bash
+cd /path/to/whicc
+
+# 1. 杀掉之前所有 whicc 后端（开发模式可能残留），避免抢同一个 events.jsonl
+pkill -9 -f "Applications/whicc.app\|whicc.py\|translate_stream.py\|glossary_refresher\|model_downloader\|audiotee" || true
+
+# 2. 生成 Xcode project（project.yml → whicc.xcodeproj）
+xcodegen generate
+
+# 3. Clean + Build Release（preBuildScript 自动嵌入 venv + src + bin + AppIcon.icns）
+xcodebuild -project whicc.xcodeproj -scheme whicc \
+  -configuration Release -derivedDataPath build clean build
+
+# 4. 装到 /Applications
+rm -rf /Applications/whicc.app
+cp -R build/Build/Products/Release/whicc.app /Applications/whicc.app
+du -sh /Applications/whicc.app           # 应 ~566MB
+
+# 5. 启动
+open /Applications/whicc.app
+# 或后台跑：
+/Applications/whicc.app/Contents/MacOS/whicc &
+```
+
+### .app 内部结构
+
+```
+/Applications/whicc.app/
+├── Contents/
+│   ├── Info.plist              (com.whicc.app, CFBundleIconFile=AppIcon, macOS 26)
+│   ├── MacOS/whicc             SwiftUI 字幕窗体二进制
+│   ├── Resources/
+│   │   ├── src/                Python 后端源码 (11 .py)
+│   │   ├── venv/               独立 Python + 所有依赖 (~556MB slim)
+│   │   ├── bin/audiotee        系统音频采集二进制
+│   │   └── AppIcon.icns        App 图标 (1.8MB, 10 个尺寸 slot)
+│   └── _CodeSignature/         Adhoc 签名
+```
+
+### 运行数据目录（macOS 26 行为）
+
+- 运行时数据：`/tmp/whicc-out/`（避免 `~/Library/Application Support` 路径 lookup bug）
+- 用户配置：macui 写到 `/tmp/whicc-out/lang_config.json` 等
+- 日志：`/tmp/whicc-out/logs/{whicc,translate-stream,glossary-refresher,model-downloader}.log`
+
+### 已知限制
+
+- **Adhoc 签名** — 不能发布给其他 Mac。正式分发需 Developer ID + 公证。
+- **MLX wheel 硬绑定** `macosx_26_0_arm64` — Intel Mac / 旧 macOS 不可用。
+- **~566MB 安装包** — venv 装满所有依赖（slim 版）。已知间接依赖（~97MB scipy
+  来自 mlx-audio）未剔除，需要时手动 delete。
+
+### 架构图（打包模式）
+
+```
+用户双击 /Applications/whicc.app
+  ↓
+SwiftUI 字幕窗体 (LSUIElement=false, 有 Dock 图标)
+  ↓ 启动 banner 显示 "正在初始化 whicc…" → … → "正在聆听" → "准备就绪 · X.XXs"
+  ↓ BackendLauncher 启动 4 个 Python 子进程,等 ASR ready 后写 banner pings
+┌─ whicc.py              ASR (Nemotron / Qwen3 / MLX)
+├─ translate_stream.py   翻译 (远端 vLLM + fallback LM Studio)
+├─ glossary_refresher.py 术语自学习
+└─ model_downloader.py   模型下载守护进程
+  ↓
+所有进程用 .app/Contents/Resources/venv/bin/python3
+  ↓
+/tmp/whicc-out/{events,translation_events}.jsonl (流式字幕)
+```

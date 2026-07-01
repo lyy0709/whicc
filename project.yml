@@ -1,0 +1,129 @@
+name: whicc
+
+# Xcode project for whicc SwiftUI frontend.
+#
+# 把 macui/Sources/macui/ 全部 Swift 文件作为 Xcode target 编译,
+# 产物: build/Release/whicc.app
+#
+# 同时在 build phase 把 Python venv + src 拷到 .app/Contents/Resources/,
+# 这样 .app 是自包含的: 双击 → Swift 启动 → 内嵌 Python 跑后端。
+#
+# 生成: xcodegen generate
+# 打开: open whicc.xcodeproj
+
+options:
+  bundleIdPrefix: com.whicc
+  deploymentTarget:
+    macOS: "26.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: 5.10
+    MACOSX_DEPLOYMENT_TARGET: 26.0
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"  # ad-hoc 签名,够本地跑; 正式发布需 Developer ID
+    DEVELOPMENT_TEAM: ""
+    ENABLE_HARDENED_RUNTIME: NO  # 本地跑不需要沙盒
+    OTHER_SWIFT_FLAGS: "-strict-concurrency=minimal"  # 跟 Package.swift 同款
+
+targets:
+  whicc:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: macui/Sources/macui
+        excludes:
+          - "**/*.md"
+          - "Assets.xcassets"  # 不让 xcodegen 自动包含
+    settings:
+      base:
+        PRODUCT_NAME: whicc
+        PRODUCT_BUNDLE_IDENTIFIER: com.whicc.app
+        INFOPLIST_FILE: macui/Info.plist  # 我们手写 plist
+        GENERATE_INFOPLIST_FILE: NO
+        # LSUIElement 在 macui/Info.plist 里手写 — 不要再在 build settings
+        # 注入,Xcode 会用它覆盖 plist(导致改 source plist 不生效)。
+        # App Icon: 走 iconutil 路线 — macui/Resources/AppIcon.icns 直接
+        # 拷到 .app/Contents/Resources/AppIcon.icns,Info.plist 设
+        # CFBundleIconFile=AppIcon。这样不依赖 actool 对 AppIcon.appiconset
+        # 的 slot 解析(macOS 26 actool 对 Contents.json 格式要求严格,
+        # iconutil 路线更稳)。
+        # Code signing
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+    # Build phase: 把 Python 后端拷进 .app/Contents/Resources/
+    # 跑 build phase 之前要先装好 venv/ (从 whicc/ 跑 pip install -r requirements.txt)
+    # IMPORTANT: 这必须是 preBuildScripts (在 CodeSign 之前跑),不然
+    # codesign 看到 .app/Contents/MacOS/whicc 没签名会拒签
+    preBuildScripts:
+      - name: "Embed Python Backend"
+        script: |
+          set -euo pipefail
+          APP_BIN="${BUILT_PRODUCTS_DIR}/${EXECUTABLE_NAME}.app"
+          RES="${APP_BIN}/Contents/Resources"
+          mkdir -p "${RES}/venv"
+          mkdir -p "${RES}/src"
+          mkdir -p "${RES}/bin"
+          # 用 venv-standalone/ (基于 python-build-standalone,无 symlink 依赖)
+          VENV_DIR="${PROJECT_DIR}/venv-standalone"
+          if [ ! -d "${VENV_DIR}/bin" ]; then
+            echo "[embed] ERROR: ${VENV_DIR} not found. Run:" >&2
+            echo "       python3.13 -m venv venv-standalone" >&2
+            echo "       venv-standalone/bin/pip install -r requirements.txt" >&2
+            exit 1
+          fi
+          # venv/: bin/ + lib/pythonX.Y/(stdlib + site-packages)
+          # 顺序:先建 lib/pythonX.Y/ 目录,拷 stdlib 进去,再拷 site-packages
+          # (不能用 cp -R lib/python3.13/* 简单合并,会丢 stdlib 内的子目录如 encodings/)
+          cp -R "${VENV_DIR}/bin" "${RES}/venv/"
+          if [ -d "${VENV_DIR}/lib" ]; then
+            for pyver in "${VENV_DIR}/lib"/*; do
+              if [ -d "${pyver}/site-packages" ]; then
+                base=$(basename "${pyver}")
+                TARGET="${RES}/venv/lib/${base}"
+                mkdir -p "${TARGET}"
+                # 拷 lib/pythonX.Y 下所有内容 (除了 site-packages) 到 .app
+                # 用 rsync 如有,否则用 cp -R 排除
+                if command -v rsync >/dev/null 2>&1; then
+                  rsync -a --exclude='site-packages' "${pyver}/" "${TARGET}/"
+                else
+                  # cp -R lib/pythonX.Y/Contents.json . → 临时中转
+                  # macOS cp 不支持 --exclude,得手写 find
+                  (cd "${pyver}" && find . -mindepth 1 -maxdepth 1 \
+                      ! -name site-packages -exec cp -R "{}" "${TARGET}/" \;)
+                fi
+                # 追加 site-packages 内容
+                cp -R "${pyver}/site-packages/." "${TARGET}/site-packages/"
+              fi
+            done
+          fi
+          # src/: Python 后端源码
+          if [ -d "${PROJECT_DIR}/src" ]; then
+            cp "${PROJECT_DIR}/src/"*.py "${RES}/src/" 2>/dev/null || true
+            cp "${PROJECT_DIR}/src/glossary.json" "${RES}/src/" 2>/dev/null || true
+          fi
+          # bin/: audiotee 二进制
+          if [ -f "${PROJECT_DIR}/bin/audiotee" ]; then
+            cp "${PROJECT_DIR}/bin/audiotee" "${RES}/bin/"
+          fi
+          # .app 内嵌的 python3 是个 symlink (python -> python3.13),codesign
+          # 可能会报 "not signed" —— 复制前 resolve 成真实 Mach-O
+          if [ -L "${RES}/venv/bin/python3" ]; then
+            rm "${RES}/venv/bin/python3"
+            cp "${RES}/venv/bin/python3.13" "${RES}/venv/bin/python3"
+          fi
+          echo "[embed] Done: $(du -sh "${APP_BIN}" | cut -f1) total"
+          echo "[embed]   venv: $(du -sh "${RES}/venv" | cut -f1)"
+          echo "[embed]   src:  $(du -sh "${RES}/src" | cut -f1)"
+          echo "[embed]   bin:  $(du -sh "${RES}/bin" | cut -f1)"
+          # AppIcon.icns: macui/Resources/AppIcon.icns → .app/Contents/Resources/AppIcon.icns
+          # (Info.plist CFBundleIconFile=AppIcon 让 LaunchServices 找这个文件)
+          if [ -f "${PROJECT_DIR}/macui/Resources/AppIcon.icns" ]; then
+            cp "${PROJECT_DIR}/macui/Resources/AppIcon.icns" "${RES}/AppIcon.icns"
+            echo "[embed]   icon: $(du -sh "${RES}/AppIcon.icns" | cut -f1)"
+          fi
+        outputFiles:
+          - "$(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_NAME).app/Contents/Resources/venv/.embed-marker"

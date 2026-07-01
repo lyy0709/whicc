@@ -1,0 +1,470 @@
+import Foundation
+
+/// 后端进程编排:启动 whicc 后端进程组 (whicc.py + translate_stream +
+/// glossary_refresher + model_downloader)。
+///
+/// 打包模式 (.app bundle 双击启动):Swift 启动后 fork 4 个 Python
+/// 子进程,使用 .app/Contents/Resources/venv/bin/python3,并写 banner-shape
+/// 启动 ping 让 macui 的 StartupBanner 正常推进 ("正在初始化 whicc…"
+/// → "正在启动后端…" → "正在扫描模型…" → "正在聆听" → "准备就绪 · X.XXs")。
+///
+/// 开发模式 (`swift run` 或 `macui/.build/debug/whicc-macui`):不主动
+/// 启动后端 — 用户自己跑 `swift run whicc.py` 等。
+@MainActor
+final class BackendLauncher {
+    private struct BackendProc {
+        let script: String
+        let args: [String]
+        let logName: String
+    }
+
+    /// launchBackendsIfNeeded() 入口记录的启动时戳。appendStartupPings
+    /// 用它算"打开 .app → ASR ready"的总耗时。class-level 静态属性 —
+    /// 打包模式整个 app 生命周期只会调一次 launchBackendsIfNeeded +
+    /// appendStartupPings,不需要担心 thread safety (整个类 @MainActor)。
+    private static var _launchStartTime: Date?
+
+    /// 启动 4 个后端进程 + 启动计时。**不**直接写 init pings —
+    /// 见 `appendStartupPings(afterLaunch:)` 的注释。
+    /// - 已在跑的同名进程会被忽略 (避免覆盖用户测试中的实例)
+    /// - 启动失败不抛异常,只 stderr 输出 (避免 UI 启动被一个进程问题阻断)
+    ///
+    /// 时序原因:EventWatcher.start() 启动时 seek 到 translation_events.jsonl
+    /// 文件尾,如果 BackendLauncher 写完 pings 才起 EventWatcher,4 条 init
+    /// pings 永远不会被读 (seek end 跳过它们)。所以本方法只做耗时测量
+    /// + spawn,真正写 pings 留给 EventWatcher 起来后调 appendStartupPings。
+    static func launchBackendsIfNeeded() {
+        let bundle = Bundle.main.bundlePath
+        logAndStderr("[BackendLauncher] isBundled=\(AppPaths.isBundledApp) bundlePath=\(bundle)")
+
+        guard AppPaths.isBundledApp else {
+            logAndStderr("[BackendLauncher] dev mode, skip")
+            return
+        }
+
+        // ── 启动计时:从这一刻到 ASR ready,即"打开 .app → 字幕可用"的总耗时 ──
+        _launchStartTime = Date()
+        logAndStderr("[BackendLauncher] launchBackendsIfNeeded ENTER runDir=\(AppPaths.runDir)")
+
+        // 准备 .app 内嵌的目录
+        let runDir = AppPaths.runDir
+        try? FileManager.default.createDirectory(
+            atPath: runDir, withIntermediateDirectories: true
+        )
+        let logDir = NSString(string: runDir).appendingPathComponent("logs")
+        try? FileManager.default.createDirectory(
+            atPath: logDir, withIntermediateDirectories: true
+        )
+
+        // 准备 jsonl 占位文件 (避免后端 open() 时缺文件 + 让 EventWatcher 有 offset 起点)
+        let eventsPath = runDir + "/events.jsonl"
+        let transEventsPath = runDir + "/translation_events.jsonl"
+        if !FileManager.default.fileExists(atPath: eventsPath) {
+            try? Data().write(to: URL(fileURLWithPath: eventsPath))
+        }
+        if !FileManager.default.fileExists(atPath: transEventsPath) {
+            try? Data().write(to: URL(fileURLWithPath: transEventsPath))
+        }
+
+        // lang_config.json 默认值:首次启动没有这文件 / 或没 translation_enabled
+        // 字段时,默认 enable translation_enabled = true。
+        // 这样 translate_stream 启动不会因 default-False 立即退出。
+        // 用户在 macui 显式关掉 → LangConfig.save() 写 false → 后续保留
+        // 用户的决定。
+        ensureDefaultLangConfig(runDir: runDir)
+
+        // 后端进程定义
+        let python = AppPaths.pythonExecutable
+        let src = AppPaths.srcDir
+        let modelsDir = "\(NSHomeDirectory())/Library/Application Support/whicc/models"
+        try? FileManager.default.createDirectory(
+            atPath: modelsDir, withIntermediateDirectories: true
+        )
+        let modelStateFile = runDir + "/model_state.json"
+        // audiotee 路径: src 是 .app/Contents/Resources/src/, audiotee 在
+        // .app/Contents/Resources/bin/audiotee (preBuildScript 拷进去)。
+        // 不能用 AppPaths.projectRoot — 打包模式下那是写死的开发机路径,
+        // 别人电脑根本不存在。
+        let audioteePath = (src as NSString).deletingLastPathComponent + "/bin/audiotee"
+
+        // Nemotron 当默认 (Nemotron 英文准 + Qwen3 中文备用,跟 whicc.py --dual-model 默认一致)
+        let defaultModel = "mlx-community/nemotron-3.5-asr-streaming-0.6b"
+        let (modelShort, modelBackend) = parseModelDisplay(defaultModel)
+
+        let backends: [BackendProc] = [
+            BackendProc(
+                script: "whicc.py",
+                args: [
+                    "--events-jsonl", eventsPath,
+                    "--model-state", modelStateFile,
+                    "--models-dir", modelsDir,
+                    "--model", defaultModel,
+                    "--language", "auto",
+                    "--mode", "streaming",
+                    "--audio-source", "system",
+                    "--audio-bin", audioteePath,
+                ],
+                logName: "whicc.log"
+            ),
+            BackendProc(
+                script: "translate_stream.py",
+                args: [
+                    "--events", eventsPath,
+                    "--out-dir", runDir,
+                    "--glossary", "\(src)/glossary.json",
+                    // 翻译 URL 全部从 lang_config.json 读 (用户自己在 macui 设置里配)。
+                    "--vllm-url", "",
+                    "--vllm-fallback-url", "",
+                    "--mode", "partial",
+                    "--target-lang", "auto",
+                    // 绕过 lang_config.json 的 translation_enabled 检查:
+                    // 用户在 macui 设置里要主动开这个 toggle,但 .app
+                    // 刚启动时 lang_config 可能还没被 UI 写过 → enabled=false
+                    // → translate_stream 立即退。--force-enable 让打包模式
+                    // 下默认就跑翻译,用户在 macui 关掉时再停。
+                    "--force-enable",
+                ],
+                logName: "translate-stream.log"
+            ),
+            BackendProc(
+                script: "glossary_refresher.py",
+                args: [],
+                logName: "glossary-refresher.log"
+            ),
+            BackendProc(
+                script: "model_downloader.py",
+                args: ["--out-dir", runDir, "--models-dir", modelsDir],
+                logName: "model-downloader.log"
+            ),
+        ]
+
+        for backend in backends {
+            spawn(python: python, src: src, backend: backend, logDir: logDir)
+        }
+
+        // ── 等待 ASR ready → 算总耗时 → 准备 banner ping 文案 ──
+        // ASR 启动后 stdout 会打 "模型就绪。启动系统音频捕获..." (whicc.py:885),
+        // 扫描日志关键词。最多等 1s,1s 内没出现就用 launchEndTime 作为 fallback
+        // (banner 立即收尾;ASR 实际上还要 1-3s 才真 ready,但 banner 已经显示,
+        // 不阻塞 UI)。
+        //
+        // 4 条 init pings 留到 EventWatcher 起来后由 main.swift 调
+        // appendStartupPings(afterLaunch:) 写 — 否则 EventWatcher 启动时
+        // seekToEndOfFile() 会跳过我们刚写的 pings。
+        let asrLogPath = logDir + "/whicc.log"
+        let asrReadyTime = waitForASRReady(
+            logPath: asrLogPath,
+            deadline: _launchStartTime?.addingTimeInterval(10.0) ?? Date().addingTimeInterval(10.0)
+        )
+        let loadSeconds = String(format: "%.2f", asrReadyTime.timeIntervalSince(_launchStartTime ?? asrReadyTime))
+        logAndStderr("[BackendLauncher] total startup \(loadSeconds)s, _launchStartTime=\(_launchStartTime != nil)")
+
+        // 准备 init ping 文案 (留到 EventWatcher 起来后再写)
+        let translationLabel = translationDisplayLabel(runDir: runDir)
+        let asrLabel = "\(modelShort) (\(modelBackend))"
+        _pendingPings = (runDir: runDir, asrLabel: asrLabel, translationLabel: translationLabel, loadSeconds: loadSeconds)
+        logAndStderr("[BackendLauncher] ready to write pings: \(asrLabel) / \(translationLabel) / \(loadSeconds)s")
+    }
+
+    /// main.swift 在 EventWatcher 起来后调这个写 4 条 banner-shape init pings。
+    ///
+    /// 时序:EventWatcher.start() 调 seekToEndOfFile() → 把读 offset 锁在
+    /// 文件尾 → DispatchSource 在 .write/.extend 时触发 readNewData。如果
+    /// BackendLauncher 之前就写好了 pings,seek 跳过它们,pings 永远不被读。
+    /// 调本方法时,EventWatcher 已经在文件尾,append 4 行后 DispatchSource
+    /// 立刻触发 → 读 → banner 翻"准备就绪" → 1.8s 后 auto-dismiss。
+    static func appendStartupPings(afterLaunch: Bool = true) {
+        logAndStderr("[BackendLauncher] appendStartupPings(afterLaunch: \(afterLaunch)) _pendingPings=\(_pendingPings != nil)")
+        guard afterLaunch else { return }  // 防御:误调直接 no-op
+        guard let pings = _pendingPings else {
+            logAndStderr("[BackendLauncher] appendStartupPings called with no _pendingPings (dev mode or no backends launched)")
+            return
+        }
+        let transLogPath = pings.runDir + "/translation_events.jsonl"
+        writeStartupPings(
+            transLogPath: transLogPath,
+            asrLabel: pings.asrLabel,
+            translationLabel: pings.translationLabel,
+            loadSeconds: pings.loadSeconds
+        )
+        logAndStderr("[BackendLauncher] wrote 4 startup pings to \(transLogPath)")
+        _pendingPings = nil
+    }
+
+    /// 同时写 stderr 和 append 到 runDir/logs/whicc-launcher.log。
+    /// 打包版 .app 默认 stderr 不重定向,纯 stderr 看不到;写文件方便诊断。
+    private static func logAndStderr(_ msg: String) {
+        fputs(msg + "\n", stderr)
+        let logPath = AppPaths.runDir + "/logs/whicc-launcher.log"
+        try? FileManager.default.createDirectory(
+            atPath: (logPath as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true
+        )
+        let line = "\(Date().timeIntervalSince1970) \(msg)\n"
+        if let data = line.data(using: .utf8) {
+            // H13 修:FileHandle(forWritingTo:) 默认 O_TRUNC,每次 open 都
+            // 先清空文件 — 调试时 launcher.log 永远只剩最后一行的内容。
+            // 改用 (forUpdatingAtPath:),append 模式保留历史内容。
+            if let handle = FileHandle(forUpdatingAtPath: logPath) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            } else if !FileManager.default.fileExists(atPath: logPath) {
+                // 文件不存在,先创建空文件再开 append handle。
+                if FileManager.default.createFile(atPath: logPath, contents: nil),
+                   let handle = FileHandle(forUpdatingAtPath: logPath) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                }
+            }
+        }
+    }
+
+    /// 准备好的 init ping 文案,留到 appendStartupPings(afterLaunch:) 写。
+    private static var _pendingPings: (runDir: String, asrLabel: String, translationLabel: String, loadSeconds: String)?
+
+    /// Parse HF model id → "(short-name, backend-name)"
+    /// - "mlx-community/nemotron-3.5-asr-streaming-0.6b" → ("nemotron-3.5-asr", "nemotron")
+    /// - "mlx-community/Qwen3-ASR-0.6B-4bit"              → ("Qwen3-ASR-0.6B", "qwen3")
+    private static func parseModelDisplay(_ modelId: String) -> (String, String) {
+        let base = (modelId as NSString).lastPathComponent
+        let lower = base.lowercased()
+        let backend: String
+        if lower.contains("qwen") { backend = "qwen3" }
+        else if lower.contains("nemotron") || lower.contains("nemo") { backend = "nemotron" }
+        else { backend = "auto" }
+        return (base, backend)
+    }
+
+    /// 翻译状态 banner 文案 — 从 lang_config.json 读 URL,fallback 到 "(未配置)"
+    /// 不展开成 "远端/本地" 等细分,UI 简洁优先;具体连通性由 translate_stream
+    /// stderr 自行报。
+    private static func translationDisplayLabel(runDir: String) -> String {
+        let cfgPath = runDir + "/lang_config.json"
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: cfgPath)),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "Hy-MT2-7B (未配置)"
+        }
+        let url = (json["translation_url"] as? String) ?? ""
+        let fallback = (json["translation_fallback_url"] as? String) ?? ""
+        if url.isEmpty && fallback.isEmpty { return "Hy-MT2-7B (未配置)" }
+        // 显示 host (去 http:// / https:// / 端口)
+        let raw = url.isEmpty ? fallback : url
+        if let host = URL(string: raw)?.host { return "Hy-MT2-7B (\(host))" }
+        return "Hy-MT2-7B"
+    }
+
+    /// scan 日志等 "模型就绪" 关键词,带超时。返回 ready 时戳或 fallback 时戳。
+    private static func waitForASRReady(logPath: String, deadline: Date) -> Date {
+        let keywords = ["模型就绪", "启动系统音频"]
+        let pollInterval: TimeInterval = 0.1
+        let scanLines = 8  // 只扫文件末尾 N 行,日志可能很大
+        while Date() < deadline {
+            if let content = try? String(contentsOfFile: logPath, encoding: .utf8) {
+                let tail = content.split(separator: "\n").suffix(scanLines).joined(separator: "\n")
+                if keywords.contains(where: tail.contains) {
+                    return Date()
+                }
+            }
+            Thread.sleep(forTimeInterval: pollInterval)
+        }
+        return Date()  // 超时,用当前时间作 fallback
+    }
+
+    /// 写 4 条 banner-shape init pings 到 translation_events.jsonl。
+    /// 格式跟 main.swift 旧版 `send_status` 同款 — 必须是 translation_final
+    /// + source_key="init-<ts>",OverlayState.applyStartupPing 才认。
+    private static func writeStartupPings(
+        transLogPath: String,
+        asrLabel: String,
+        translationLabel: String,
+        loadSeconds: String
+    ) {
+        let now = Date().timeIntervalSince1970
+        let pings: [(String, String)] = [
+            ("ASR: \(asrLabel)", "ASR: \(asrLabel)"),
+            ("翻译: \(translationLabel)", "Translation: \(translationLabel)"),
+            ("加载完成 | \(loadSeconds)s", "Startup complete | \(loadSeconds)s"),
+            ("whicc 正在聆听", "whicc is listening"),
+        ]
+        // 用 FileManager 追加(O_APPEND 模式)— Foundation 的 write(to:) 默认是
+        // truncate,会覆盖整个文件。FileHandle(forUpdatingAtPath:) 持有写句柄
+        // 即可 append。
+        guard let handle = FileHandle(forWritingAtPath: transLogPath) else {
+            fputs("[BackendLauncher] FAILED to open \(transLogPath) for append\n", stderr)
+            return
+        }
+        defer { try? handle.close() }
+        handle.seekToEndOfFile()
+
+        for (i, (zh, en)) in pings.enumerated() {
+            // 每条 source_key 加 i 毫秒,避免 macui OverlayState.applyStartupPing
+            // 视为同一条 (它用 sourceKey 做去重判断)
+            let ts = Int((now + Double(i) * 0.001) * 1000)
+            let entry: [String: Any] = [
+                "event_type": "translation_final",
+                "source_key": "init-\(ts)",
+                "source_update_mode": "reset_full",
+                "source_text": en,
+                "translated_full_text": zh,
+                "translate_ms": 0,
+                "shared_prefix_len": 0,
+                "glossary_hits": [],
+                "retried": false,
+                "fallback_reason": "",
+            ]
+            guard let data = try? JSONSerialization.data(
+                withJSONObject: entry, options: []
+            ), var line = String(data: data, encoding: .utf8) else {
+                continue
+            }
+            line += "\n"
+            if let bytes = line.data(using: .utf8) {
+                handle.write(bytes)
+            }
+        }
+        // 强制 flush 到磁盘,EventWatcher 才能立刻读到
+        try? handle.synchronize()
+    }
+
+    private static func spawn(python: String, src: String, backend: BackendProc, logDir: String) {
+        fputs("[BackendLauncher] spawn \(backend.script) log=\(logDir)/\(backend.logName)\n", stderr)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: python)
+        process.arguments = [src + "/" + backend.script] + backend.args
+        process.currentDirectoryURL = URL(fileURLWithPath: src)
+
+        let stdoutPath = logDir + "/" + backend.logName
+        let stderrPath = stdoutPath.replacingOccurrences(of: ".log", with: ".err.log")
+        // truncate 模式 — 每次启动清空旧 log。
+        for path in [stdoutPath, stderrPath] {
+            do {
+                let empty = Data()
+                try empty.write(to: URL(fileURLWithPath: path))
+            } catch {
+                fputs("[BackendLauncher] WARN failed to create log \(path): \(error)\n", stderr)
+            }
+        }
+        // C6 修:stdout / stderr 用独立 FileHandle(独立 fd)。之前共用
+        // 一个 fd 时,Python 缓冲下 stderr 一行可能被 stdout 写入从中间
+        // 切开 — 日志可读性灾难,无法 grep 单独 ASR/translation 输出。
+        // append 模式 (Foundation FileHandle(forWritingAtPath:) 默认)
+        // — 多次 process 启动不会清彼此的 log(我们上面已经 truncate)。
+        let stdoutHandle = FileHandle(forWritingAtPath: stdoutPath)
+        let stderrHandle = FileHandle(forWritingAtPath: stderrPath)
+        guard let out = stdoutHandle, let err = stderrHandle else {
+            fputs("[BackendLauncher] FAILED to open log handles for \(stdoutPath) / \(stderrPath)\n", stderr)
+            // 退路:用 Pipe() 否则 Swift 端崩溃
+            process.standardOutput = Pipe().fileHandleForWriting
+            process.standardError = Pipe().fileHandleForWriting
+            try? process.run()
+            return
+        }
+        process.standardOutput = out
+        process.standardError = err
+
+        // 关键:start_new_session 把子进程从 Swift 的 process group 摘出,
+        // 这样 Swift 退出时不会给子进程发 SIGHUP
+        do {
+            try process.run()
+            fputs("[BackendLauncher] started \(backend.script) pid=\(process.processIdentifier)\n", stderr)
+        } catch {
+            fputs("[BackendLauncher] FAILED to start \(backend.script): \(error)\n", stderr)
+        }
+    }
+
+    /// 翻译节点总开关的默认值处理。
+    ///
+    /// 第一次启动打包版 .app 时,lang_config.json 不存在,translate_stream.py
+    /// 读 translation_enabled 缺省为 False 直接退。为避免「双击 .app 没翻译」,
+    /// 这里在没这字段时默认开。
+    ///
+    /// 用户后续在 macui 设置里改过 → LangConfig.save() 写盘 → 字段存在 →
+    /// 这里跳过 (不覆盖用户的决定)。
+    private static func ensureDefaultLangConfig(runDir: String) {
+        let cfgPath = runDir + "/lang_config.json"
+        fputs("[BackendLauncher] ensureDefaultLangConfig \(cfgPath)\n", stderr)
+        let url = URL(fileURLWithPath: cfgPath)
+
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: url),
+           let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            json = parsed
+            fputs("[BackendLauncher]   read existing, keys=\(json.keys.sorted())\n", stderr)
+        } else {
+            fputs("[BackendLauncher]   no existing config (or unreadable)\n", stderr)
+        }
+
+        var modified = false
+
+        // translation_enabled 缺省 → true
+        // 关键:如果已经是 false 也保持 false,尊重用户在 macui 设置里
+        // 显式关掉的决定。只有"完全没这字段"才设默认。
+        if json["translation_enabled"] == nil {
+            json["translation_enabled"] = true
+            modified = true
+            fputs("[BackendLauncher] default translation_enabled=true (no existing key)\n", stderr)
+        } else if let v = json["translation_enabled"] as? Bool, !v {
+            fputs("[BackendLauncher] translation_enabled=false (user disabled), keeping\n", stderr)
+        } else {
+            fputs("[BackendLauncher] translation_enabled=true (already set), keeping\n", stderr)
+        }
+
+        // translation_fallback_url 缺省 → 不写默认值。
+        // 之前硬编码 "http://localhost:1234",然后 translate_stream 启动时
+        // 把它当已知值处理 → 用户从来没机会在 UI 看到"翻译 URL 是空的"提示。
+        // 现状: 缺省 = 字段不存在,translate_stream 看到空就退出 + 提示
+        // 用户去 macui 设置里配翻译节点。
+        if json["translation_fallback_url"] == nil {
+            // 字段缺失,不主动设,等用户自己填
+            fputs("[BackendLauncher] translation_fallback_url 缺省,跳过 (用户需在 macui 配)\n", stderr)
+        }
+
+        // audio_source / source_lang / target_lang 默认值
+        if json["audio_source"] == nil {
+            json["audio_source"] = "system"
+            modified = true
+        }
+        if json["source_lang"] == nil {
+            json["source_lang"] = "auto"
+            modified = true
+        }
+        if json["target_lang"] == nil {
+            json["target_lang"] = "auto"
+            modified = true
+        }
+
+        if !modified { return }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: json, options: [.prettyPrinted]
+        ) else { return }
+        try? data.write(to: url, options: .atomic)
+        fputs("[BackendLauncher] wrote \(cfgPath)\n", stderr)
+        // 写后立即读回,看是 macOS 立刻覆盖还是保留
+        if let reread = try? Data(contentsOf: url) {
+            fputs("[BackendLauncher]   reread size=\(reread.count)\n", stderr)
+        } else {
+            fputs("[BackendLauncher]   reread FAILED (file gone!)\n", stderr)
+        }
+    }
+
+    /// Kill all backend processes — applicationWillTerminate 时调。
+    /// 跟 BackendShutdown.terminateLocalBackend() 同款逻辑,但用 SIGKILL
+    /// 而非 SIGTERM (macui 退出会彻底清场,不留尾巴)。
+    ///
+    /// 之前 4 次串行 pkill,主线程最长阻塞 ~400ms — applicationWillTerminate
+    /// 在主线程调,会被系统判定为"未响应"。改成:1 次 pkill 正则匹配所有模式,
+    /// 丢到后台 Task 不阻塞主线程。
+    static func terminateBackends() {
+        guard AppPaths.isBundledApp else { return }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        task.arguments = ["-9", "-f", "whicc-audio|glossary_refresher|translate_stream|whicc.py"]
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        // 不 waitUntilExit — applicationWillTerminate 在主线程,pkill 异步
+        // 跑,SwiftUI 在 pkill 跑完前已经退到系统级清理流程。
+    }
+}

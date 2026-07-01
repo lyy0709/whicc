@@ -1,0 +1,53 @@
+macui/.build/
+# SwiftPM regenerates an empty whicc-overlay/.build/ tree of
+# module-cache files when it indexes the macui sources. There's
+# no source code under it — it's leftover references to a
+# directory that used to exist. Ignore so the regenerated cache
+# doesn't show up as untracked noise.
+whicc-overlay/
+# audiotee 二进制（make_source system 模式需要）：编译产物，不该 commit。
+# 编译脚本 bin/build_audiotee.sh 在 git 里追踪。
+bin/audiotee
+.DS_Store
+__pycache__/
+# Pylance 的 workspace settings — 每个开发者 IDE 偏好不同,不加 git
+.vscode/
+src/_glossary_changes.jsonl
+src/_glossary_control.json
+src/_glossary_meta.json
+src/_glossary_meta.json
+/models/
+# 用户本地模型目录（macOS 最佳实践位置），不打包进仓库
+# 用户从 HuggingFace 下载到 ~/Library/Application Support/whicc/models/
+# 模型是运行时数据，不是构建产物
+macui/.build/
+src/lost_drafts.jsonl
+# glossary_refresher.py 运行时从 Hermes 同步下来再写入，
+# 是用户本地数据 + 运行时缓存，不是源码——每次跑会变，不该 commit。
+src/glossary.json
+# audiotee vendor 源码（编译时 clone，编译产物已 cp 到 ./bin/audiotee）
+.vendor/
+
+# --- Python venv (开发模式 + 打包模式) ---
+# venv/        - 老 venv (symlink 到 homebrew,1.2GB), 开发用
+# venv-standalone/ - 打包用的 python-build-standalone 独立 venv (1.3GB)
+# 不要 commit — wheel 解压产物,git clone 后重新跑 pip install -r requirements.txt
+venv/
+venv-standalone/
+
+# --- Xcode build 产物 ---
+# build/       - xcodebuild 输出 (xcodebuild -derivedDataPath build)
+# macui/.build - SwiftPM 的 build dir (.build/debug/whipp-macui 等)
+# whicc.xcodeproj/ - xcodegen 生成, project.yml 是源, .xcodeproj 应该 gitignore (CI 重新生成)
+#               注: 如果你的工作流是 commit .xcodeproj (xcode 项目很稳定), 把这一行去掉
+build/
+macui/.build/
+# Xcode user-specific files
+xcuserdata/
+
+# --- Python byte cache ---
+__pycache__/
+*.pyc
+*.pyo
+# xcodegen 生成的 Xcode project (project.yml 是源, .xcodeproj 重新生成)
+whicc.xcodeproj/
