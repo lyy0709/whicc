@@ -34,7 +34,7 @@ final class ModelState: ObservableObject {
     struct ModelInfo: Identifiable, Equatable {
         let id: String
         let displayName: String
-        let backend: String   // "whisper" | "qwen3" | "nemotron"
+        let backend: String   // "qwen3" | "nemotron"
         let kind: Kind        // 区分 ASR 主模型 vs 辅助模型
         let sizeBytes: Int64
         let path: URL
