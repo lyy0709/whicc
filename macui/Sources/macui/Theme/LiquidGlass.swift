@@ -56,9 +56,17 @@ struct HUDControlBackground: ViewModifier {
             .padding(.horizontal, 6)
             .frame(height: Palette.controlHeight)
             .background {
+                // 共享 HUD plate 的 frosted glass。未选态用 4% 半透明白作
+                // 微背景(给 chip 视觉边界,hover 才看得到这是按钮);
+                // 选中态 18% 半透明白作选中 tint。早期 8% 半透明白在 HUD
+                // glass 上太重,看起来像 chip 自己有不透明背景,反而盖住
+                // 了 Liquid Glass 的 frosted 效果。
                 Capsule(style: .continuous)
-                    .fill(selected ? Palette.controlSelected : Palette.controlFill)
+                    .fill(selected
+                          ? Palette.controlSelected
+                          : Palette.controlFillSubtle)
             }
+            .contentShape(Capsule())
     }
 }
 

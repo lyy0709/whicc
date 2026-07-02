@@ -61,7 +61,7 @@ enum Palette {
 
     // Control fill (frosted background)
     static let controlFill: Color = .white.opacity(0.08)
-    static let controlFillStrong: Color = .white.opacity(0.12)
+    static let controlFillSubtle: Color = .white.opacity(0.04)
     static let controlSelected: Color = .white.opacity(0.18)
 }
 
