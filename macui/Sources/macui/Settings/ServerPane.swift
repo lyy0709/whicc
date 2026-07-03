@@ -333,25 +333,22 @@ struct ServerPane: View {
     private func onSaveAndRestart() {
         restartInFlight = true
         restartResult = nil
-        // restartTranslateStream 是 @MainActor 同步方法,内部 pkill + Thread.sleep
-        // + Process.run 大约 0.5s — 在 Task 里调避免 block UI,但 Task 默认
-        // 不在 main actor 上,所以要 hop 回 main actor 更新状态。
-        Task { @MainActor in
-            // restartTranslateStream 本身已经是 @MainActor 同步方法,
-            // 不要再 await (会触发 "No 'async' operations occur within
-            // 'await' expression" 警告)。这里就是直接同步调,然后在
-            // 当前 actor 上更新状态。
+        // restartTranslateStream 内部有 pkill + Thread.sleep。放到 detached
+        // task 里跑，避免按钮 spinner 刚出现就把 SwiftUI 主线程卡住。
+        Task.detached(priority: .userInitiated) {
             let success = BackendShutdown.restartTranslateStream()
-            restartInFlight = false
-            restartResult = success
-                ? .success
-                : .failure("启动失败,看 /tmp/translate-stream.log")
-            // 2s 后清掉成功提示 (失败保留,等下次操作覆盖)
-            if success {
-                Task { @MainActor in
-                    try? await Task.sleep(for: .seconds(2))
-                    if case .success = restartResult {
-                        restartResult = nil
+            await MainActor.run {
+                restartInFlight = false
+                restartResult = success
+                    ? .success
+                    : .failure("启动失败,看 /tmp/translate-stream.log")
+                // 2s 后清掉成功提示 (失败保留,等下次操作覆盖)
+                if success {
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .seconds(2))
+                        if case .success = restartResult {
+                            restartResult = nil
+                        }
                     }
                 }
             }

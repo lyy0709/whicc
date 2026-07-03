@@ -70,9 +70,8 @@ enum BackendShutdown {
     /// 返回值: 启动成功 true,失败 false (stderr 写到 log)。
     ///
     /// 路径解析走 AppPaths:开发模式用项目 venv,打包模式用 .app bundle
-    /// 内嵌的 venv。Thread.sleep 0.5s 让旧进程有时间 flush 日志 — 会卡
-    /// UI 一会,用户量少可接受。
-    @MainActor
+    /// 内嵌的 venv。调用方应在后台线程执行，避免 Thread.sleep / pkill
+    /// 阻塞 SwiftUI 主线程。
     @discardableResult
     static func restartTranslateStream() -> Bool {
         // 1. 杀旧进程 (SIGTERM,跟 terminateLocalBackend 一致)
