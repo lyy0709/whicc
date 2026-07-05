@@ -1,87 +1,147 @@
 # whicc
 
+> **Your local translation safety net for foreign-language video.**
+> 给你看外语视频时心里踏实的一个翻译兜底。
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: macOS 26+](https://img.shields.io/badge/Platform-macOS%2026%2B-blue.svg)](https://developer.apple.com/macos/)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1%2FM2%2FM3%2FM4-black.svg)](https://support.apple.com/en-us/116943)
 [![Python 3.13](https://img.shields.io/badge/Python-3.13-blue.svg)](https://www.python.org/)
 [![Swift 5.9+](https://img.shields.io/badge/Swift-5.9%2B-orange.svg)](https://www.swift.org/)
 
-macOS 上的实时语音识别 + 翻译字幕浮岛。本地 ASR 模型转写系统音频 / 麦克风，自动语言检测，自学习术语库，33 种语言翻译，macOS 26 SwiftUI 字幕浮窗。
+<!-- TODO: 替换为实际截图/GIF,建议放 2 个:
+     1) macOS 字幕浮窗运行时截图(双语字幕 + 浮岛样式)
+     2) 任意外语视频上叠加运行的 15s GIF
+     放在 docs/screenshots/ 或仓库根目录,然后改下面链接
+-->
+<p align="center">
+  <img src="docs/screenshots/demo.png" alt="whicc running on macOS" width="720">
+</p>
 
-**一句话定位**：纯本地算力，识别 + 翻译多国语言，比 YouTube 直播的自动翻译**更准、更快、可定制**。
+**whicc** = **whi**(sper) + **cc**(closed captions) — 看外语视频时,屏幕上永远挂着一个本地算力撑起来的翻译字幕。
 
-运行于 Apple Silicon (MLX)。打包成单 `.app` bundle，双击即可使用。
+你不需要它完美。你只需要——**看不懂的时候,有个兜底**。
+看中东某语言的直播,翻译有 60-70% 准,已经够你抓住大意;
+看 AI 访谈,术语可能时不时错一个,但整体跟得上;
+噪声大的场景,识别会糊,翻译也会跟着糊——但**它一直在,不会消失**。
 
-> 如果你是开发者，想从源码运行或自己打包 `.app`，看 [DEVELOPMENT.md](DEVELOPMENT.md)。
+而且这套字幕会随着开源 ASR / 翻译模型的进化自动变强,模型越好,whicc 越好。
 
-## 为什么用 whicc
+---
 
-- **纯本地算力**：ASR（语音转文字）在本地 Apple Silicon 上跑，不依赖云端转写服务。音频不出本机。
-- **多国语言**：识别 + 翻译覆盖 33 种语言（中英日德法西俄韩阿等），识别部分支持自动语言检测。
-- **可联网的翻译后端**：本地 ASR 把音频变成文字后，翻译交给 LM Studio 。可以是本机的、可以是局域网的另一台机器、可以用LM Link在世界任何地方调用家里的闲置算力，把闲置设备盘活。
+## ✨ 核心特性
 
-## 系统要求
+- **🛡️ 翻译兜底** — 看外语视频时,屏幕永远有字幕,心里永远有底。不是为了完美,是为了**永远在**。
+- **🖥️ 纯本地算力ASR和翻译 ** — Nemotron-3.5-ASR (非中文) + Qwen3-ASR (中文) 在 Apple Silicon (MLX) 上跑。**音频不出本机**,不依赖任何云端转写服务。
+- **🌐 覆盖大多数语言** — 翻译后端用 Tencent Hy-MT2,支持中/英/日/德/法/西/俄/韩/阿/葡/意 等几十种语言任意互译,小语种也兜得住。
+- **🔌 翻译服务由你提供** — whicc 自己不带翻译模型,你需要装 [LM Studio](https://lmstudio.ai/) 加载翻译模型(可以是本机 Mac、家里 Windows、局域网任何机器)。模型越大,翻译越好。
+- **🪟 SwiftUI 浮岛字幕** — macOS 26 Liquid Glass 浮窗,自动隐藏/唤起,中英文自动切换。
+- **🤖 自学习术语库** — jieba 关键词抽取 + 场景检测 + Hermes Agent 术语搜索,术语自动沉淀到 glossary.json,下次翻译自动应用。
+- **📈 模型越好它越好** — ASR 模型 / 翻译模型任一侧升级,whicc 字幕质量跟着提升,无需改代码。
 
-- **macOS 26+**（MLX wheel 硬绑定 `macosx_26_0_arm64`）
-- **Apple Silicon**（M1 / M2 / M3 / M4）
-- **约 1.5 GB 本机磁盘**（首次启动会下载 2 个 ASR 模型：Nemotron 1.2GB 英文 + Qwen3 680MB 中文）
-- **翻译服务**：需要一台跑 LM Studio / vLLM 的机器提供 OpenAI 兼容 HTTP 接口
-  - 本机：装 [LM Studio](https://lmstudio.ai/)，加载 `tencent/Hy-MT2-1.8B-GGUF`
-  - 局域网/外网：另一台机器装 LM Studio 加载更大的 `tencent/Hy-MT2-7B-GGUF`（这样你本机就不用装了，翻译质量会显著提升）
+---
 
-## 安装
+## 🎯 它是什么,不是什么
 
-1. 从 [Releases](../../releases) 下载 `whicc.app.zip`，解压
-2. 把 `whicc.app` 拖拽到 `/Applications/`
-3. 双击 `whicc.app` 启动，或终端跑：
-   ```bash
-   open /Applications/whicc.app
-   ```
+**whicc 是一个翻译字幕兜底,在没有字幕的时候，根据系统声音或者是麦克风输入进行实时翻译。**
 
-首次启动请进入设置面板（也可按 ⌘, 或点设置按钮打开）：
+- ✅ 你看一个中东语言的直播,翻译 60-70% 准,你能抓住大意 — 这就够了。
+- ✅ 你看 AI 访谈,术语偶尔错一个,但整体跟得上 — 这就够了。
+- ✅ 你看一晚上 4 小时直播,whicc 不会卡、不会断、不会突然收费 — 这就够了。
 
-1. **下载 ASR 模型**：HuggingFace 自动下载（需要流畅的网络环境）。等显示完成后继续，如果下载失败，请删掉模型文件重新点击下载。
-2. **配置翻译服务**：填 LM Studio 的URL（例 `http://192.168.1.10:1234`）
+---
 
-**停止**：⌘Q 关闭字幕窗体（自动 SIGTERM 后端进程）。万一卡住：
+## 📦 系统要求
 
-```bash
-pkill -f whicc.py          # 杀 ASR 后端
-pkill -f Applications/whicc # 杀整个 .app
+| 项 | 要求 |
+|---|---|
+| OS | **macOS 26+** (MLX wheel 硬绑定 `macosx_26_0_arm64`) |
+| 芯片 | **Apple Silicon** (M1 / M2 / M3 / M4) |
+| 磁盘 | 首次启动下载 ASR 模型,约 **2 GB** |
+| Python | 3.13 (用于源码开发模式,普通用户用 .app 无需) |
+
+**翻译服务(必须 — 想要译文就必须装)**
+
+whicc 自己不带翻译模型。翻译功能依赖外部 LM Studio / vLLM 节点提供 OpenAI 兼容 HTTP 接口。
+没有它,字幕会只剩原文(原文字幕仍然正常,只是没有译文)。
+
+准备翻译服务(必须做这一步,否则没有翻译):
+
+1. 装 [LM Studio](https://lmstudio.ai/) (本机或局域网任何一台机器都行,Windows / Mac / Linux 都支持)
+2. 在 LM Studio 里加载翻译模型 — 推荐 `tencent/Hy-MT2-1.8B-GGUF`,机器够强就上 `Hy-MT2-7B-GGUF` 或更大,参数越大翻译越好
+3. 在 LM Studio 启动 OpenAI 兼容 server (默认 `http://localhost:1234`)
+4. 在 whicc 设置面板填这个 URL
+
+翻译节点可以是你**本机的 Mac**,也可以是**家里另一台 Windows PC**、局域网里任何一台闲置机器、甚至外网云端 — 只要网络可达。
+
+---
+
+## 🚀 安装
+
+### 普通用户(推荐)
+
+1. 去 [Releases](../../releases) 下载最新的 `whicc.app.zip`
+2. 解压后把 `whicc.app` 拖到 `/Applications/`
+3. 双击启动
+
+首次启动会自动打开设置面板(也可按 `⌘,` 或点齿轮):
+
+1. **下载 ASR 模型** — HuggingFace 自动下载,需要通畅的网络环境
+2. **准备翻译服务** — 在本机或局域网任何一台机器上装 [LM Studio](https://lmstudio.ai/),加载翻译模型(`tencent/Hy-MT2-1.8B-GGUF` 或更大),启动 OpenAI 兼容 server
+3. **填翻译服务 URL** — 例 `http://192.168.1.10:1234`(本机填 `http://localhost:1234`),模型名填 LM Studio 实际加载的 ID
+4. **开始看视频** — 打开任意外语视频/直播,字幕自动叠加
+
+### 开发者(从源码跑)
+
+看 [DEVELOPMENT.md](DEVELOPMENT.md) — 包含 CLI 参数、项目结构、核心机制、打包 `.app` 流程。
+
+---
+
+## 🏗️ 架构
+
+```
+系统音频 / 麦克风 (ScreenCaptureKit / mic)
+        ↓  16kHz PCM chunks
+   whicc.py (ASR)                    ← 本地 Apple Silicon MLX
+   ├─ Qwen3-ASR-0.6B  (中文)
+   └─ Nemotron-3.5-ASR (英文, two-pass correction)
+        ↓  /tmp/whicc-out/events.jsonl        (partial + final 字幕事件)
+   translate_stream.py               ← LM Studio / vLLM HTTP
+        ↓  /tmp/whicc-out/translation_events.jsonl
+   macui (SwiftUI 字幕浮岛)
+        ↓
+   glossary_refresher.py             ← jieba + Hermes Agent 自学习术语
 ```
 
-## 架构
+**关键解耦**: ASR (重) 跑在本地 Mac,翻译 (HTTP 调用) 可以在任何有网络的机器。
+翻译节点挂了不会影响 ASR 本地识别,字幕照样出原文。
 
-```
-系统音频 / 麦克风
-    ↓  16kHz PCM 段文件
-whicc.py (ASR: Qwen3-ASR / Nemotron)  ← 本地 Apple Silicon 算力
-    ↓  /tmp/whicc-out/events.jsonl         (partial + final 字幕事件)
-translate_stream.py (Hy-MT2 翻译)  ← 本机 LM Studio / 局域网闲置算力 / 云端
-    ↓  /tmp/whicc-out/translation_events.jsonl
-whicc-macui (SwiftUI 字幕浮岛)
-    ↓
-glossary_refresher.py (jieba + Hermes Agent 自学习术语)
-```
+详细架构图、打包模式、BackendLauncher 进程树见 [DEVELOPMENT.md](DEVELOPMENT.md#架构图-打包模式)。
 
-**关键设计点**：ASR（重）+ 翻译（轻，HTTP 调用）解耦。ASR 必须在本地（音频流不能出本机），翻译可以甩到任何有 HTTP 的机器上。
+---
 
-详细架构（含打包模式、BackendLauncher 进程树）见 [DEVELOPMENT.md](DEVELOPMENT.md#架构图-打包模式)。
+## 🌍 支持的语言
 
-日志位置和翻译观测指标见 [DEVELOPMENT.md → 日志与排查](DEVELOPMENT.md#日志与排查)。
+| 用途 | 模型 | 支持 |
+|---|---|---|
+| ASR 识别 | Nemotron-3.5-ASR | 英文 + 自动检测 (中/日/韩/西/德/法 等) |
+| ASR 识别 | Qwen3-ASR-0.6B | 中文 + 多种方言 |
+| 翻译 | Tencent Hy-MT2 | **33 种语言任意互译** (中/英/日/德/法/西/俄/韩/阿/葡/意/荷/越/泰/印尼 等) |
 
-## 翻译配置
+默认以 Nemotron 启动,检测到 CJK 字符占比 >30% 时自动切到 Qwen3。
 
-### 启用翻译
+---
 
-第一次启动翻译默认是关闭的。在 macui 设置面板（齿轮按钮）里：
+## ⚙️ 翻译配置
 
-1. **服务配置 → 启用翻译**：打开开关
-2. **主 URL**：vLLM / LM Studio 的 OpenAI 兼容地址（例：`http://192.168.1.10:1234`）
-3. **备用 URL**：主节点不通时 fallback 的本机 LM Studio（例：`http://localhost:1234`）
-4. **模型名**：远端 LM Studio 实际加载的模型 ID
+第一次启动翻译默认关闭。在 macui 设置面板(齿轮):
 
-配置文件 `lang_config.json`（写在 `/tmp/whicc-out/`）4 个键：
+1. **服务配置 → 启用翻译** 打开
+2. **主 URL** 填 LM Studio 地址(例 `http://192.168.1.10:1234`)
+3. **备用 URL** 填本机 fallback(例 `http://localhost:1234`)
+4. **模型名** 填 LM Studio 实际加载的模型 ID
+
+配置文件 `/tmp/whicc-out/lang_config.json`:
 
 ```json
 {
@@ -92,80 +152,80 @@ glossary_refresher.py (jieba + Hermes Agent 自学习术语)
 }
 ```
 
-主 URL 不通时自动 fallback 到备用；所有候选都不可达时进程 loud-fail 退出并在字幕窗体提示"翻译服务不可用"。
+主 URL 不通自动 fallback,全挂时字幕窗体显示"翻译服务不可用",但**原文字幕仍然正常**。
 
-### 目标语言
+### 目标语言切换
 
-macui 工具栏有语言选择器（"自动" 按钮），可实时切换目标语言（有延迟），无需重启。
-默认自动模式：英文 ↔ 中文互译。Hy-MT2 官方支持 33 种语言（`Japanese` / `German` / `Traditional Chinese` 等）。
+macui 工具栏语言选择器实时切换,**无需重启**。
+默认自动模式:中文↔英文互译。
 
-### 翻译场景
+### 场景 prompt 注入
 
-设置面板里可以填写"翻译场景"，如 `AI访谈` / `NBA季后赛总决赛`。场景描述会注入到翻译 prompt 中，帮助模型理解上下文。
+设置面板填场景描述(例 `AI访谈` / `NBA总决赛`),会注入翻译 prompt 帮助模型理解上下文。
 
-### 事件识别
+---
 
-设置面板里有"🎯 事件识别"功能，自动推断当前正在观看的事件（足球赛、发布会、财报会等），生成临时术语表注入翻译，不污染永久词库，2 小时后自动过期。
+## 📺 字幕窗体
 
-置信度 ≥80% 直接应用；55%-80% 弹窗询问确认。
+- **位置**: 屏幕顶部居中悬浮
+- **自动隐藏**: 非焦点/非 hover 时整组 `opacity(0)` 不响应点击
+- **双语字幕**: 现场切换"原文上 / 译文上"
+- **7 个 accent 主题**: White / Ice / Gold / Neon / Coral / Violet / Cyan
+- **液态玻璃**: macOS 26 SwiftUI `GlassEffectContainer`
+- **中英文自动切换 ASR**: 标题栏左侧显示当前模型,3 秒自动消失
 
-## ASR 模型
+---
 
-模型文件**不打包进 app**——首次启动自动从 HuggingFace 下载（ML 项目的标准做法）。模型缓存在 `~/Library/Application Support/whicc/models/`。
+## 🛠️ 开发者
 
-| 模型 | 大小 | 流式 | 两遍校正 |
-|------|------|------|----------|
-| Qwen3-ASR-0.6B-4bit | 680MB | ✓ | ✗ |
-| nemotron-3.5-asr-streaming-0.6b | 1.2GB | ✓ | ✓ |
+- 从源码运行: [DEVELOPMENT.md → 开发模式启动](DEVELOPMENT.md#开发模式启动)
+- 完整 CLI 参数: [DEVELOPMENT.md → CLI 参考](DEVELOPMENT.md#cli-参数)
+- 项目结构: [DEVELOPMENT.md → 项目结构](DEVELOPMENT.md#项目结构)
+- 自己打包 `.app`: [DEVELOPMENT.md → 打包成 macOS .app](DEVELOPMENT.md#打包成-macos-app)
+- 核心机制 (断句 / 翻译防护 / 术语库): [DEVELOPMENT.md → 核心机制](DEVELOPMENT.md#核心机制)
 
-通过设置界面「中文识别」/「非中文识别」槽位切换。
+---
 
-### 中英文自动切换
+## 🗺️ 路线图
 
-默认以 Nemotron 启动。当检测到中文内容（CJK 字符占比 > 30%）时，自动切换到 Qwen3（中文 / 方言识别更好）；切回英文时自动恢复 Nemotron。
+- [ ] **TTS 同声传译** — 翻译结果直接 TTS 播出来,形成完整同传闭环
+- [ ] **VAD 替换能量阈值** — 用 Silero VAD 替换当前能量检测,断句更准
+- [ ] **Speaker diarization** — NVIDIA Sortformer 区分说话人
+- [ ] **外置 Agent 词库训练** — 术语库用 Hermes Agent 训练形成自学习闭环
 
-标题栏左侧会显示当前 ASR 模型切换状态（3 秒自动消失）。
+---
 
-## 字幕窗体
-
-- **位置**：屏幕顶部居中悬浮
-- **自动隐藏**：非焦点 / 非 hover 时整组 `opacity(0)` + 不响应点击
-- **双语字幕**：可现场切换"原文上 / 译文上"
-- **7 个 accent 颜色**（White / Ice / Gold / Neon / Coral / Violet / Cyan），应用于字幕文字
-- **液态玻璃**：macOS 26 SwiftUI `Window` + `GlassEffectContainer`
-
-## 后续开发方向
-
-- **同声传译模式**：后续将引入TTS，把翻译结果直接播出来，形成完整的同传体验。
-- **外置 Agent 词库进一步优化**：术语库可在 Agent 中训练，形成自学习闭环
-
-## 常见问题
+## ❓ 常见问题
 
 | 现象 | 原因 | 修复 |
-|------|------|------|
-| 字幕窗体无字幕 | ASR 还没启动或没识别到声音 | 等启动 banner "准备就绪" 后说话；查看 `whicc.log` |
-| 翻译不工作 | LM Studio 未启动 / 网络不通 / 配置未启用 | 在设置面板确认 `translation_enabled=true` + URL 可达 |
-| 翻译整段出现 | 后端没走 partial 同传模式 | 重启 app；如果还不行看 [DEVELOPMENT.md](DEVELOPMENT.md) CLI 参数确认 `--mode partial` |
-| ASR 不识别中文 | 后端没启用 auto 语言检测 | 在设置面板确认中文识别槽位是 Qwen3 |
+|---|---|---|
+| 字幕窗体无字幕 | ASR 还没启动或没识别到声音 | 等启动 banner "准备就绪" 后说话;看 `whicc.log` |
+| 翻译不工作 | LM Studio 未启动 / 网络不通 / 配置未启用 | 设置面板确认 `translation_enabled=true` + URL 可达 |
+| 翻译整段出现 (一行) | 后端没走 partial 同传模式 | 重启 app;或看 [DEVELOPMENT.md](DEVELOPMENT.md) 确认 `--mode partial` |
+| ASR 不识别中文 | 后端没启用 auto 语言检测 / Qwen3 没下载 | 设置面板确认中文识别槽位是 Qwen3 |
 | 切换语言不生效 | `lang_config.json` 没更新 | 检查 macui 设置面板写入是否正常 |
 | `retry=True` / `leak=True` 频繁 | 模型输出质量差 / prompt 需要调整 | 看 [DEVELOPMENT.md](DEVELOPMENT.md) 翻译防护机制 |
-| 字幕窗体不响应点击 | 当前是 hover-hide 状态 | 鼠标移到字幕区域唤醒 |
+| 字幕窗体不响应点击 | hover-hide 状态 | 鼠标移到字幕区域唤醒 |
+| 卡住关不掉 | 后端进程没收到 SIGTERM | `pkill -f whicc.py` 或 `pkill -f Applications/whicc` |
 
-## 开发者
+---
 
-- 从源码运行：[DEVELOPMENT.md → 开发模式启动](DEVELOPMENT.md#开发模式启动)
-- 完整 CLI 参数：[DEVELOPMENT.md → CLI 参考](DEVELOPMENT.md#cli-参数)
-- 项目结构：[DEVELOPMENT.md → 项目结构](DEVELOPMENT.md#项目结构)
-- 自己打包 `.app`：[DEVELOPMENT.md → 打包成-macos-app](DEVELOPMENT.md#打包成-macos-app)
-- 核心机制（断句 / 翻译防护 / 术语库）：[DEVELOPMENT.md → 核心机制](DEVELOPMENT.md#核心机制)
+## 📄 许可证
 
-## 许可证
+MIT License — 见 [LICENSE](LICENSE)。
 
-本项目代码以 **MIT License** 发布 — 见 [LICENSE](LICENSE)。
-
-使用了以下第三方组件，详见 [NOTICE](NOTICE)：
+第三方组件(详见 [NOTICE](NOTICE)):
 - **AudioTee** (MIT, by Nick Payne) — 编译进 `bin/audiotee` 的 macOS 系统音频采集
 - **Qwen3-ASR** (Apache 2.0) — 中文 ASR 模型
 - **Nemotron 3.5 ASR** (NVIDIA Open Model License) — 英文 ASR 模型
-- **Hy-MT2** (Tencent Model License) — 翻译模型（在 LM Studio / vLLM 中加载）
-- 详见 [NOTICE](NOTICE)
+- **Tencent Hy-MT2** (Tencent Model License) — 翻译模型(在 LM Studio / vLLM 中加载)
+
+---
+
+## 🙏 致谢
+
+- [mlx-audio](https://github.com/Blaizzy/mlx-audio) — Apple Silicon MLX 推理框架
+- [Tencent Hy-MT2](https://huggingface.co/tencent/Hy-MT2-1.8B-GGUF) — 翻译模型
+- [NVIDIA Nemotron](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b) — ASR 模型
+- [Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-4bit) — ASR 模型
+- [LM Studio](https://lmstudio.ai/) — 本地 LLM 运行器
