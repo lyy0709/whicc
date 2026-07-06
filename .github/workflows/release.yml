@@ -54,7 +54,10 @@ jobs:
       # ---- Diagnostic snapshot (capture regardless of build outcome) ----
       # Captures GitHub runner's environment so failure analysis
       # doesn't depend on accessing CI logs (which require admin auth).
-      - name: Snapshot environment
+      # Note: This step uploads to env-snapshot artifact on EVERY run
+      # (success and failure). That's 1KB / run of storage — 30KB / month
+      # if you ship one release a month, well within free quota.
+      - name: Capture + upload env snapshot
         if: always()
         run: |
           {
@@ -62,30 +65,30 @@ jobs:
             uname -a
             echo "=== xcode-select ==="
             xcode-select -p
-            echo "=== xcodebuild -version (extended) ==="
+            echo "=== xcodebuild -version ==="
             xcodebuild -version
             echo "=== sh ==="
             ls -la /bin/sh
             echo "=== which python3.13 ==="
-            which python3.13 || echo "(not found on PATH)"
-            echo "=== disk space ==="
+            which python3.13 || echo "(not on PATH)"
+            echo "=== disk ==="
             df -h / /tmp
             echo "=== memory ==="
             vm_stat | head -5
             echo "=== ulimit ==="
             ulimit -a
             echo "=== /tmp contents ==="
-            ls -la /tmp/ | head
+            ls -la /tmp/ | head -20
             echo "=== venv-standalone structure (post-symlink) ==="
             ls -la venv-standalone/ 2>&1 | head -5
-            ls venv-standalone/bin/ 2>&1 | head -10
+            ls venv-standalone/bin/ 2>&1 | head
             echo "=== xcodebuild.log size BEFORE build ==="
             ls -la /tmp/xcodebuild.log 2>&1 || echo "(no log yet)"
           } > /tmp/env_snapshot.txt 2>&1
-          head -50 /tmp/env_snapshot.txt
-
-      - name: Upload env snapshot on failure
-        if: failure()
+          echo "---env_snapshot.txt first 30 lines---"
+          head -30 /tmp/env_snapshot.txt
+      - name: Upload env snapshot
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: env-snapshot
