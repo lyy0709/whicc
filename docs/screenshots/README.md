@@ -57,7 +57,7 @@ file size stays under 20 MB.
    ```
 5. Place at `docs/screenshots/demo.mov`
 
-**README syntax:**
+**README syntax (used in root `README.md`):**
 ```markdown
 <video src="docs/screenshots/demo.mov" controls width="720" preload="metadata"></video>
 ```
