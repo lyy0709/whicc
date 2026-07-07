@@ -302,6 +302,22 @@ open build/dist/whicc-0.1.1.dmg
 
 **修复**：从 `hdiutil create` 命令里去掉 `-format UDRW` flag——只创建从 -size 的卷默认就是 UDRW（Apple-recommended staging format）。
 
+### dmg 装到用户机 ASR 失效：`whicc.py` crash,日志显示"启动系统音频捕获..."后无输出
+
+**症状**：用户从 GitHub release 下载 dmg 装上,app 启动但不出字幕,没弹任何权限对话框。`pgrep -lf whicc.app` 看到主进程 + glossary_refresher + model_downloader,**但没有 whicc.py 和 audiotee**。`whicc.log` 末尾卡在"启动系统音频捕获...",`/tmp/whicc-seg/` 不存在。
+
+**根因 (v0.1.2 hotfix 2)**:`bin/audiotee` 在 `.gitignore` 里。CI runner checkout 后这个文件不存在 → preBuildScript `if [ -f "${PROJECT_DIR}/bin/audiotee" ]` 失败 → 不拷到 .app → whicc.py spawn 时找不到 audiotee → crash。`BackendLauncher` 不检查 spawn 的子进程是否还活着,只看 stdout log "模型就绪" 关键词,所以 launcher log 显示"ready"但 whicc.py 实际已经 crash。
+
+**本地复现**:
+```bash
+# 检查 dmg 装到用户机后 .app/Contents/Resources/bin/ 是否为空
+ls /Applications/whicc.app/Contents/Resources/bin/
+# 期望:audiotee (319KB Mach-O)
+# 失败:空目录
+```
+
+**修复 (v0.1.3)**:从 `.gitignore` 移除 `bin/audiotee` 并 commit 二进制进 git。319KB Mach-O 是稳定产物,commit 比让 CI 重新跑 vendor clone + swift build 简单可控。开发者改 audiotee vendor 源码后要重新跑 `bin/build_audiotee.sh` 然后 commit 新二进制。
+
 ### dmg 装到用户机 ASR 失效：`Library not loaded: /opt/homebrew/Cellar/python@3.13/...Python`
 
 **症状**：用户从 GitHub release 下载 `whicc-v0.1.X.dmg` 安装后,launcher log 报"ready"但 whicc.py 没起来。`pgrep -lf whicc.app` 只有主进程,没 whicc.py / translate_stream.py。`/tmp/whicc-out/logs/whicc.log` 是 0 字节。

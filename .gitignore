@@ -5,9 +5,14 @@ macui/.build/
 # directory that used to exist. Ignore so the regenerated cache
 # doesn't show up as untracked noise.
 whicc-overlay/
-# audiotee 二进制（make_source system 模式需要）：编译产物，不该 commit。
-# 编译脚本 bin/build_audiotee.sh 在 git 里追踪。
-bin/audiotee
+# audiotee vendor 源码（编译时 clone，编译产物已 cp 到 ./bin/audiotee）
+.vendor/
+
+# bin/audiotee — 系统音频捕获二进制（Swift compile 产物）现在 commit 进 git
+# 原因:CI runner checkout 后必须能立刻 build 出完整 .app(含 audiotee),
+# 不能依赖额外 vendor clone + swift build。319KB 二进制比 5min CI build 步骤
+# 改动更可控。开发者改 audiotee vendor 源码后,要重新跑 bin/build_audiotee.sh
+# 然后 commit 新二进制覆盖。
 .DS_Store
 __pycache__/
 # Pylance 的 workspace settings — 每个开发者 IDE 偏好不同,不加 git
