@@ -224,6 +224,17 @@ Third-party components (see [NOTICE](NOTICE)):
 
 ---
 
+<!-- CONTRIBUTING -->
+## Top contributors
+
+<a href="https://github.com/nbzz/whicc/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=nbzz/whicc&max=5&anon=0&columns=5" alt="contributors" />
+</a>
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+---
+
 ## 🙏 Acknowledgements
 
 - [mlx-audio](https://github.com/Blaizzy/mlx-audio) — Apple Silicon MLX inference framework

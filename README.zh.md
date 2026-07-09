@@ -223,6 +223,17 @@ MIT License — 见 [LICENSE](LICENSE)。
 
 ---
 
+<!-- CONTRIBUTING -->
+## 顶级贡献者
+
+<a href="https://github.com/nbzz/whicc/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=nbzz/whicc&max=5&anon=0&columns=5" alt="contributors" />
+</a>
+
+<p align="right">(<a href="#readme-top">回到顶部</a>)</p>
+
+---
+
 ## 🙏 致谢
 
 - [mlx-audio](https://github.com/Blaizzy/mlx-audio) — Apple Silicon MLX 推理框架
