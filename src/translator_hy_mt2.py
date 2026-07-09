@@ -647,9 +647,18 @@ class VLLMBackend:
         # 当前 base_url 实际用的 model_id (生成请求时用)
         self._active_model_id = self._model_per_url.get(self.base_url, model_id)
 
+    # 浏览器风格 UA — 不少 API 中转站挂在 Cloudflare 后面并开了
+    # 浏览器完整性检查,默认的 "Python-urllib/3.x" UA 直接被
+    # 403 "error code: 1010" 拦下(实测 cliproxy.fkoai.com:换这个
+    # UA 后同一 key 同一端点立刻 200)。
+    _USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/126.0.0.0 Safari/537.36 whicc")
+
     def _headers(self, sse: bool = False) -> dict:
         """请求头 — 当前 base_url 配了 API key 就带 Bearer 鉴权。"""
-        h = {"Content-Type": "application/json"}
+        h = {"Content-Type": "application/json",
+             "User-Agent": self._USER_AGENT}
         if sse:
             h["Accept"] = "text/event-stream"
         key = self._api_key_per_url.get(self.base_url, "")
@@ -775,13 +784,31 @@ class VLLMBackend:
 
     @staticmethod
     def _resolve_ipv4(url: str) -> str:
-        """将 URL 中的主机名解析为 IPv4 地址，避免 IPv6 连接问题。"""
+        """http + 私网/回环主机 → IPv4 字面量(局域网 LM Studio 域名双栈
+        解析时 urllib 先试 IPv6 连不上,每个请求白等一次超时)。
+
+        其余一律保留域名,绝不替换成 IP:
+        - https:TLS SNI/证书按主机名校验,换成 IP 必挂
+          (SSLV3_ALERT_HANDSHAKE_FAILURE);
+        - 代理 fake-ip DNS(Clash/Surge 等,198.18.0.0/15):域名解析出
+          假 IP,换成 IP 字面量后绕开代理直连死路 — 实测用户机器上
+          cliproxy.fkoai.com → 198.18.0.70 就是这么把翻译整个打挂的;
+        - 公网 http:保留域名走系统代理/CDN 语义。
+        """
+        import ipaddress
         import socket
         from urllib.parse import urlparse, urlunparse
         try:
             parsed = urlparse(url)
+            if parsed.scheme != "http":
+                return url
             ip = socket.getaddrinfo(parsed.hostname, parsed.port or 80,
                                     socket.AF_INET)[0][4][0]
+            addr = ipaddress.ip_address(ip)
+            if addr in ipaddress.ip_network("198.18.0.0/15"):
+                return url  # 代理 fake-ip,换成 IP = 绕开代理,必死
+            if not (addr.is_private or addr.is_loopback):
+                return url  # 公网 http,保留域名
             return urlunparse(parsed._replace(
                 netloc=f"{ip}:{parsed.port}" if parsed.port else ip
             ))
@@ -802,7 +829,7 @@ class VLLMBackend:
         """
         import urllib.request
         import urllib.error
-        headers = {}
+        headers = {"User-Agent": self._USER_AGENT}
         key = self._api_key_per_url.get(base_url, "")
         if key:
             headers["Authorization"] = f"Bearer {key}"
