@@ -622,7 +622,7 @@ class VLLMBackend:
         # per-URL API key — 非空时所有请求(探活 + 生成)带
         # `Authorization: Bearer` 头。key 跟 candidates 同格式化。
         self._api_key_per_url: dict[str, str] = {
-            self._resolve_ipv4(k.rstrip("/")): v
+            self._resolve_ipv4(self._normalize_base(k)): v
             for k, v in (api_key_map or {}).items() if v
         }
         # 请求端点: "chat"=/v1/chat/completions(默认路径),
@@ -630,17 +630,18 @@ class VLLMBackend:
         # "auto"=先走 chat,收到 404/405 自动切 responses(反之亦然)并锁定。
         self.endpoint = endpoint if endpoint in ("auto", "chat", "responses") else "auto"
         self._active_endpoint = "responses" if endpoint == "responses" else "chat"
-        # 每个都解析成 IPv4 字面量(避免 v6 连接问题) + 去尾斜杠
-        self._candidates = [self._resolve_ipv4(u.rstrip("/")) for u in urls]
+        # 每个都规范化(去尾斜杠/剥 /v1 后缀,见 _normalize_base) +
+        # 解析成 IPv4 字面量(避免 v6 连接问题)
+        self._candidates = [self._resolve_ipv4(self._normalize_base(u)) for u in urls]
         self.base_url = self._pick_healthy()  # 选中的那个
         # 默认 model_id (未在 model_map 中显式映射的 URL 都用它)
         # 空串 = 不在请求体里塞 model 字段,由 vLLM 服务端选默认
         self.model_id = model_id
-        # per-URL model 覆盖 — key 跟 self._candidates 同格式(IPv4 + 去尾
-        # 斜杠),确保 lookup 命中。fallback 链允许远端和本机用不同模型
+        # per-URL model 覆盖 — key 跟 self._candidates 同格式(规范化 +
+        # IPv4),确保 lookup 命中。fallback 链允许远端和本机用不同模型
         # (比如远端 32B,本机 1.8B)
         self._model_per_url: dict[str, str] = {
-            self._resolve_ipv4(k.rstrip("/")): v
+            self._resolve_ipv4(self._normalize_base(k)): v
             for k, v in (model_map or {}).items()
         }
         # 当前 base_url 实际用的 model_id (生成请求时用)
@@ -760,6 +761,17 @@ class VLLMBackend:
             f"VLLMBackend: 所有候选 URL 都不可达 ({len(self._candidates)} 个):\n"
             + "\n".join(errors)
         )
+
+    @staticmethod
+    def _normalize_base(url: str) -> str:
+        """防呆规范化:用户可能填 http://host:port 或 http://host:port/v1
+        (OpenAI SDK / LM Studio 界面的惯用形式)。统一剥成不带 /v1 的
+        base — 拼接端点时统一加 /v1/...,两种填法都工作。不剥的话
+        /v1/v1/models → 404 → 节点被误判不可达。"""
+        u = url.strip().rstrip("/")
+        if u.lower().endswith("/v1"):
+            u = u[:-3].rstrip("/")
+        return u
 
     @staticmethod
     def _resolve_ipv4(url: str) -> str:

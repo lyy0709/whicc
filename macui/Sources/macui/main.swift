@@ -349,9 +349,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     private func openSettings() {
+        // 顺序关键:必须**先 activate 再 makeKey**。macOS 14+ 协作式
+        // 激活下,app 未激活时 makeKeyAndOrderFront 的 makeKey 部分会
+        // 静默失效 — 窗口显示出来但不是 key window,所有 TextField
+        // 点不进光标("设置页输入框全部无法输入"的根因)。字幕浮窗是
+        // .nonactivatingPanel,从它的齿轮打开设置时 app 恰好总是未激活,
+        // 旧顺序(先 makeKey 后 activate)必现。
         if let win = settingsWindow, win.isVisible {
-            win.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            win.makeKeyAndOrderFront(nil)
+            Self.ensureKeyAfterActivation(win)
             return
         }
         guard let controller = windowController else { return }
@@ -389,8 +396,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         win.contentView = hosting
         win.isReleasedWhenClosed = false
         win.center()
-        win.makeKeyAndOrderFront(nil)
+        // 先 activate 再 makeKey(理由见 openSettings 开头注释)
         NSApp.activate(ignoringOtherApps: true)
+        win.makeKeyAndOrderFront(nil)
+        Self.ensureKeyAfterActivation(win)
         settingsWindow = win
 
         // 关掉窗口时把 settingsWindow 设回 nil，下次 openSettings() 就
@@ -401,6 +410,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.settingsWindow = nil
         }
         cleaner.install()
+    }
+
+    /// 协作式激活是**异步批准**的 — activate 请求发出的同一 runloop 里
+    /// makeKey 可能仍被拒。下一个 runloop 周期补一次,覆盖批准落地的
+    /// 窗口期(设置窗仍不是 key 就再 makeKey 一次)。
+    @MainActor
+    private static func ensureKeyAfterActivation(_ win: NSWindow) {
+        DispatchQueue.main.async { [weak win] in
+            guard let win, win.isVisible, !win.isKeyWindow else { return }
+            win.makeKeyAndOrderFront(nil)
+        }
     }
 
     // MARK: - Lifecycle

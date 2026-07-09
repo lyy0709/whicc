@@ -44,6 +44,10 @@ final class LangConfig: ObservableObject {
     /// (/v1/chat/completions) / "responses"(/v1/responses — GPT 系列
     /// 流式端点,一些站点只提供它)。改完需重启 translate_stream 生效。
     @Published var translationEndpoint: String = "auto"
+    /// 模型下载加速:开启后 model_downloader / whicc.py 的 HF 下载走
+    /// hf-mirror.com 镜像。直连 huggingface.co 缓慢/受限的网络环境
+    /// 开这个;海外网络保持关闭(直连更快)。下一次下载即生效。
+    @Published var hfMirrorEnabled: Bool = false
     @Published var hermesHost: String = ""
     /// Subtitle font choice — persisted but owned by `OverlayState`
     /// (UI binds to `state.fontChoice`). `LangConfig` just stores the
@@ -212,6 +216,11 @@ final class LangConfig: ObservableObject {
         save()
     }
 
+    func setHfMirrorEnabled(_ enabled: Bool) {
+        hfMirrorEnabled = enabled
+        save()
+    }
+
     func setHermesHost(_ host: String) {
         hermesHost = host
         save()
@@ -277,10 +286,34 @@ final class LangConfig: ObservableObject {
 
     // MARK: - Reachability
 
+    /// 规范化用户填写的服务地址,返回**不带 /v1** 的 base(调用方统一拼
+    /// "/v1/models" 等端点):
+    /// - 补 http:// 前缀(用户填 "127.0.0.1:1234")
+    /// - 去尾部斜杠(避免 //v1/models 双斜杠)
+    /// - **剥掉 /v1 后缀** — OpenAI SDK / LM Studio 界面惯用
+    ///   "http://host:port/v1" 形式,用户照抄很常见;不剥的话拼出
+    ///   /v1/v1/models → 404 → 被误判"服务不可达"。两种填法都工作。
+    static func normalizeServiceBase(_ raw: String) -> String {
+        var u = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if u.isEmpty { return u }
+        if !u.hasPrefix("http://") && !u.hasPrefix("https://") {
+            u = "http://" + u
+        }
+        while u.hasSuffix("/") { u = String(u.dropLast()) }
+        if u.lowercased().hasSuffix("/v1") {
+            u = String(u.dropLast(3))
+            while u.hasSuffix("/") { u = String(u.dropLast()) }
+        }
+        return u
+    }
+
     /// 构造探活/拉模型列表请求 — key 非空时带 `Authorization: Bearer` 头
     /// (OpenAI 兼容标准;vLLM --api-key / 各类网关都认这个头)。
+    /// 5s 超时:URLRequest 默认 60s,URL 指向不响应的地址(防火墙 DROP)
+    /// 时状态行会挂在"正在探测连通性"整整一分钟。
     private static func authedRequest(_ url: URL, apiKey: String) -> URLRequest {
         var req = URLRequest(url: url)
+        req.timeoutInterval = 5
         if !apiKey.isEmpty {
             req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
@@ -292,17 +325,14 @@ final class LangConfig: ObservableObject {
             translationReachable = nil
             return
         }
-        // URL 规范化:
-        // - 自动加 http:// 前缀(用户填 "127.0.0.1:1234")
-        // - strip 末尾 /,避免拼成 //health / //v1/models 双斜杠 — LM Studio
-        //   对 //health 不会 404,但日志会刷 "Unexpected endpoint" 警告
         // 用 /v1/models 而不是 /health 探活: 跟 translator_hy_mt2.py 的
         // _check_health 保持一致 — LM Studio/vLLM/Ollama 都暴露
         // OpenAI 兼容的 /v1/models,且要求 data 非空 = 模型真的加载好了
-        // (/health 只测 server alive,刚启动还没加载模型时也返回 200)
-        let url = translationUrl.hasPrefix("http") ? translationUrl : "http://\(translationUrl)"
-        let normalizedUrl = url.hasSuffix("/") ? String(url.dropLast()) : url
-        guard let endpoint = URL(string: "\(normalizedUrl)/v1/models") else {
+        // (/health 只测 server alive,刚启动还没加载模型时也返回 200)。
+        // 地址规范化(补 http:// / 去尾斜杠 / 剥 /v1 后缀)统一走
+        // normalizeServiceBase — 防呆见其注释。
+        let base = Self.normalizeServiceBase(translationUrl)
+        guard let endpoint = URL(string: "\(base)/v1/models") else {
             translationReachable = false
             return
         }
@@ -335,7 +365,7 @@ final class LangConfig: ObservableObject {
             remoteModelsFetched = nil
             return
         }
-        let base = translationUrl.hasPrefix("http") ? translationUrl : "http://\(translationUrl)"
+        let base = Self.normalizeServiceBase(translationUrl)
         guard let endpoint = URL(string: "\(base)/v1/models") else {
             remoteModels = []
             remoteModelsFetched = false
@@ -380,7 +410,7 @@ final class LangConfig: ObservableObject {
             remoteModelsFallbackFetched = nil
             return
         }
-        let base = translationFallbackUrl.hasPrefix("http") ? translationFallbackUrl : "http://\(translationFallbackUrl)"
+        let base = Self.normalizeServiceBase(translationFallbackUrl)
         guard let endpoint = URL(string: "\(base)/v1/models") else {
             remoteModelsFallback = []
             remoteModelsFallbackFetched = false
@@ -446,13 +476,10 @@ final class LangConfig: ObservableObject {
             translationFallbackReachable = nil
             return
         }
-        // 同样规范化:strip trailing /,探活走 /v1/models (跟 detectTranslation 同逻辑,
-        // 也跟 Python 端 translator_hy_mt2._check_health 一致)。
-        let url = translationFallbackUrl.hasPrefix("http")
-            ? translationFallbackUrl
-            : "http://\(translationFallbackUrl)"
-        let normalizedUrl = url.hasSuffix("/") ? String(url.dropLast()) : url
-        guard let endpoint = URL(string: "\(normalizedUrl)/v1/models") else {
+        // 同样规范化(补 http:// / 去尾斜杠 / 剥 /v1),探活走 /v1/models
+        // (跟 detectTranslation 同逻辑,也跟 Python 端 _check_health 一致)。
+        let base = Self.normalizeServiceBase(translationFallbackUrl)
+        guard let endpoint = URL(string: "\(base)/v1/models") else {
             translationFallbackReachable = false
             return
         }
@@ -497,6 +524,7 @@ final class LangConfig: ObservableObject {
             if let ep = json["translation_endpoint"] as? String, !ep.isEmpty {
                 self.assignIfChanged(\.translationEndpoint, ep)
             }
+            self.hfMirrorEnabled = (json["hf_mirror_enabled"] as? Bool) ?? false
             // 旧配置文件没有 translation_enabled 键,默认为关(纯本地)。
             // 这样老用户升级后行为不会突变。
             self.translationEnabled = (json["translation_enabled"] as? Bool) ?? false
@@ -539,6 +567,7 @@ final class LangConfig: ObservableObject {
         if let ep = json["translation_endpoint"] as? String, !ep.isEmpty {
             self.translationEndpoint = ep
         }
+        self.hfMirrorEnabled = (json["hf_mirror_enabled"] as? Bool) ?? false
         self.translationEnabled = (json["translation_enabled"] as? Bool) ?? false
         self.hermesHost = (json["hermes_host"] as? String) ?? ""
         if let font = json["subtitle_font"] as? String { self.subtitleFont = font }
@@ -585,6 +614,7 @@ final class LangConfig: ObservableObject {
         json["translation_api_key"] = translationApiKey
         json["translation_fallback_api_key"] = translationFallbackApiKey
         json["translation_endpoint"] = translationEndpoint
+        json["hf_mirror_enabled"] = hfMirrorEnabled
         json["translation_enabled"] = translationEnabled
         json["hermes_host"] = hermesHost
         json["subtitle_font"] = subtitleFont
