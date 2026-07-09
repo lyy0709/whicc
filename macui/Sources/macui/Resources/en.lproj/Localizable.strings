@@ -273,6 +273,7 @@
 "关闭" = "Close";
 
 /* ===== HUD: button .help() tooltips ===== */
+"字幕窗口背景透明度" = "Subtitle window background opacity";
 "复制全部字幕（译文 / 原文 / 全部）" = "Copy all subtitles (translation / source / all)";
 "缩小字幕" = "Decrease subtitle size";
 "放大字幕" = "Increase subtitle size";
