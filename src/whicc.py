@@ -1360,15 +1360,22 @@ def main():
             # 只消费数据:live 模式读 source.queue,segdir 模式轮询段文件。
             # SIGINT/SIGTERM 时 audio_source.stop() 会优雅退出。
             #
-            # 保留 30s 长 stall 的总超时,防止 audio 源自己挂了重启又
-            # 不成功时,whicc.py 无限循环。
+            # 保留长 stall 总超时,防止 audio 源自己挂了重启又不成功时
+            # whicc.py 无限空转。12s = supervisor 5s stall 重启一次
+            # audiotee + 观察窗:救不回(macOS process tap 对 kill 后
+            # respawn 的 audiotee 常静默拒绝授权,只给零数据)就快速换
+            # 进程 — 新 whicc.py 进程 spawn 的 audiotee 能重新拿到授权
+            # (实测),比等 30s 少断流 18s。
             now = time.monotonic()
-            # 收到首段数据后才开始计 30s;启动期静音不退出。
-            if last_data_time is not None and now - last_data_time > 30.0:
-                print(f"\n[error] 音频源 30s 无数据,whicc.py 退出。"
-                      "检查 audio.py 错误日志或 audiotee 二进制。",
+            # 收到首段数据后才开始计时;启动期静音不退出。
+            if last_data_time is not None and now - last_data_time > 12.0:
+                print(f"\n[error] 音频源 12s 无数据(audiotee 重启也没救回),"
+                      "退出换新进程重新授权 process tap。",
                       file=sys.stderr, flush=True)
-                break
+                # exit 4 = 音频自愈重启(恢复性,不是故障)。BackendLauncher
+                # 按 code 给"正在自动恢复"文案而不是"异常退出"。
+                # SystemExit 会经 finally 完整清理(metrics/logger/audio)。
+                sys.exit(4)
 
             # 读取新音频:
             #  - live(system/mic): 阻塞至多 POLL_INTERVAL 等内存 queue 的

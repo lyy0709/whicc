@@ -553,6 +553,12 @@ final class BackendLauncher {
     /// - translate_stream.py: 翻译服务 URL 未配置 / 翻译未启用
     private static let _exitWaitingConfig: Int32 = 3
 
+    /// 音频自愈重启的约定退出码(恢复性,不是故障):whicc.py 检测到
+    /// 音频源 12s 无数据(macOS process tap 对 respawn 的 audiotee 静默
+    /// 拒绝授权)主动退出,由监控拉起新进程重新拿授权。给"正在自动
+    /// 恢复"文案,别用"异常退出"吓用户。
+    private static let _exitAudioRecover: Int32 = 4
+
     private static var _monitored: [MonitoredProc] = []
     private static let _monitorLock = NSLock()
     private static var _monitorTimer: DispatchSourceTimer?
@@ -583,6 +589,7 @@ final class BackendLauncher {
             guard !m.process.isRunning else { continue }
             let code = m.process.terminationStatus
             let waiting = (code == _exitWaitingConfig)
+            let audioRecover = (code == _exitAudioRecover)
             // 退避:快速重启次数耗尽后,每 _slowRetryInterval 才试一次。
             // 例外:"等配置"退出(code 3)时,对应资源一就绪就立即重启 —
             // whicc.py 等 models 目录出现新 .complete(模型下载完成),
@@ -601,12 +608,15 @@ final class BackendLauncher {
             let n = _monitored[i].restarts
             logAndStderr("[monitor] \(m.backend.script) exited (code \(code)), "
                          + "restart #\(n)\(n > _fastRestarts ? " (slow retry)" : "")")
-            if waiting {
-                // 配置性等待,不是故障 — 给指引而不是吓人的"异常退出";
-                // 只发一次,静默重试。
+            if waiting || audioRecover {
+                // 配置性等待 / 音频自愈,不是故障 — 给指引而不是吓人的
+                // "异常退出";只发一次,静默重试。
                 if !m.waitingNoticeShown {
                     _monitored[i].waitingNoticeShown = true
-                    let (zh, en) = waitingNotice(script: m.backend.script)
+                    let (zh, en) = audioRecover
+                        ? ("🎧 系统音频捕获中断(输出设备切换/录音授权变化),正在自动恢复…",
+                           "🎧 System audio capture interrupted (device switch / permission change); recovering automatically…")
+                        : waitingNotice(script: m.backend.script)
                     appendBackendNotice(zh: zh, en: en)
                 }
             } else {
