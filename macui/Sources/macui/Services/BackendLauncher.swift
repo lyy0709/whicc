@@ -599,6 +599,47 @@ final class BackendLauncher {
         }
     }
 
+    /// 用户主动重启某个后端(如 ServerPane 的"保存并重启翻译服务")的
+    /// **统一通道** — 必须走这里而不是自行 pkill+spawn:监控 5s 内会把
+    /// pkill 掉的进程当"死亡"再拉起一个,跟按钮自己 spawn 的撞成
+    /// **双实例**,并发写 translation_events.jsonl → 字幕重复交错。
+    /// 本方法持监控锁完成 杀旧+respawn+更新注册表,监控全程看到的是
+    /// 一致状态;spawn 参数/日志路径与首次启动完全同款(含 --force-enable)。
+    ///
+    /// 返回 false = 打包模式未启动(dev 模式)或未知脚本,调用方可走
+    /// dev 模式的兜底路径。
+    @discardableResult
+    static func restartBackend(script: String) -> Bool {
+        _monitorLock.lock()
+        defer { _monitorLock.unlock() }
+        guard let ctx = _spawnContext,
+              let i = _monitored.firstIndex(where: { $0.backend.script == script }) else {
+            return false
+        }
+        let old = _monitored[i].process
+        if old.isRunning {
+            old.terminate()  // SIGTERM,让 Python 侧 flush 日志
+            let deadline = Date().addingTimeInterval(2)
+            while old.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if old.isRunning {
+                kill(old.processIdentifier, SIGKILL)
+            }
+        }
+        logAndStderr("[monitor] user-requested restart of \(script)")
+        guard let p = spawn(python: ctx.python, src: ctx.src,
+                            backend: _monitored[i].backend, logDir: ctx.logDir,
+                            truncateLogs: true) else {
+            return false
+        }
+        _monitored[i].process = p
+        _monitored[i].restarts = 0            // 用户主动重启,计数清零
+        _monitored[i].lastRestartAt = Date()
+        _monitored[i].waitingNoticeShown = false
+        return true
+    }
+
     /// "等配置"退出(code 3)的字幕区指引文案,按脚本区分。
     private static func waitingNotice(script: String) -> (zh: String, en: String) {
         switch script {

@@ -450,10 +450,15 @@ struct ServerPane: View {
     private func onSaveAndRestart() {
         restartInFlight = true
         restartResult = nil
-        // restartTranslateStream 内部有 pkill + Thread.sleep。放到 detached
-        // task 里跑，避免按钮 spinner 刚出现就把 SwiftUI 主线程卡住。
+        // 重启内部有 pkill / Thread.sleep。放到 detached task 里跑，
+        // 避免按钮 spinner 刚出现就把 SwiftUI 主线程卡住。
         Task.detached(priority: .userInitiated) {
-            let success = BackendShutdown.restartTranslateStream()
+            // 打包模式必须走 BackendLauncher 的统一重启通道 — 自行
+            // pkill+spawn 会跟存活监控的自动拉起撞成双实例(并发写
+            // translation_events → 字幕重复)。dev 模式(监控未启动,
+            // restartBackend 返回 false)走旧的 pkill+spawn 兜底。
+            let success = BackendLauncher.restartBackend(script: "translate_stream.py")
+                || BackendShutdown.restartTranslateStream()
             await MainActor.run {
                 restartInFlight = false
                 restartResult = success
