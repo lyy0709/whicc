@@ -118,7 +118,7 @@ struct ModelPane: View {
                     isRecommendedReady: isFullyDownloaded(Self.recommendedChineseASR),
                     currentValue: Binding(
                         get: { modelState.chineseASR },
-                        set: { modelState.setChineseASR($0) }
+                        set: { modelState.setChineseASR($0); Self.restartASRBackend() }
                     ),
                     isCurrentReady: isFullyDownloaded(modelState.chineseASR),
                     onDownload: { downloadState.requestDownload(modelId: $0) }
@@ -133,7 +133,7 @@ struct ModelPane: View {
                     isRecommendedReady: isFullyDownloaded(Self.recommendedNonChineseASR),
                     currentValue: Binding(
                         get: { modelState.nonChineseASR },
-                        set: { modelState.setNonChineseASR($0) }
+                        set: { modelState.setNonChineseASR($0); Self.restartASRBackend() }
                     ),
                     isCurrentReady: isFullyDownloaded(modelState.nonChineseASR),
                     onDownload: { downloadState.requestDownload(modelId: $0) }
@@ -356,9 +356,9 @@ struct ModelPane: View {
 
             // 状态提示
             // 1. 空值 → "（未设置）"
-            // 2. 推荐 ID 且本地有 → "切换后需重启app生效"
+            // 2. 推荐 ID 且本地有 → "切换后自动重启识别,数秒内生效"
             // 3. 推荐 ID 且本地没有 → "本地未下载" + [下载] 按钮（手动触发，符合 macOS HIG）
-            // 4. 其他（手输的 ID）→ "切换后需重启app生效"（不管本地有没有，逻辑同上）
+            // 4. 其他（手输的 ID）→ 同 2（不管本地有没有）
             if currentValue.wrappedValue.isEmpty {
                 Text("（未设置）")
                     .font(.caption).foregroundColor(.secondary)
@@ -376,9 +376,20 @@ struct ModelPane: View {
                     .buttonStyle(.borderedProminent)
                 }
             } else {
-                Text("切换后需重启app生效")
+                Text("切换后自动重启识别后端，数秒内生效")
                     .font(.caption).foregroundColor(.secondary)
             }
+        }
+    }
+
+    /// 槽位变更后重启 whicc.py,让新模型立即生效 — 之前提示重启 app,
+    /// 而实际上重启 app 也不生效(后端只读旧 current_model 字段,
+    /// 槽位键无人消费,已在 model_state.py 修复)。
+    /// 走 BackendLauncher 统一重启通道(与监控协调,不会双实例);
+    /// dev 模式(通道返回 false)静默跳过,用户自管后端。
+    private static func restartASRBackend() {
+        Task.detached(priority: .userInitiated) {
+            _ = BackendLauncher.restartBackend(script: "whicc.py")
         }
     }
 
@@ -485,6 +496,11 @@ struct ModelPane: View {
                 let downloaded = Self.formatBytes(dl.downloadedBytes)
                 let total = Self.formatBytes(dl.totalBytes)
                 return "\(pct)%  \(downloaded) / \(total)"
+            }
+            // 总大小未知(镜像/网络拿不到元数据)但字节在动 — 显示
+            // 已下载量,别让用户以为卡死
+            if dl.downloadedBytes > 0 {
+                return "已下载 \(Self.formatBytes(dl.downloadedBytes))"
             }
             return "准备中…"
         case .completed:

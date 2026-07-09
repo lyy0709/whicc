@@ -137,6 +137,7 @@ class _ProgressTracker:
         self.total_bytes: int = 0        # 所有文件总大小
         self.downloaded_bytes: int = 0   # 累计已下载
         self.last_emitted_pct: float = -1.0
+        self._last_emit_t: float = 0.0   # 上次发进度的 monotonic 时刻
 
     def reset(self):
         """下载前重置。"""
@@ -159,15 +160,29 @@ class _ProgressTracker:
             raise DownloadCancelled(model_id)
         with self._lock:
             self.downloaded_bytes += n
+            now = time.monotonic()
             if self.total_bytes <= 0:
+                # 拿不到总大小(model_info 失败/镜像不返回)— 按时间发
+                # 字节进度(pct=0),UI 显示"已下载 X MB"不再永远 0%。
+                if now - self._last_emit_t >= 3.0:
+                    self._last_emit_t = now
+                    _emit_event("progress", model_id,
+                                downloaded_bytes=self.downloaded_bytes,
+                                total_bytes=0, pct=0.0)
                 return
             pct = min(self.downloaded_bytes / self.total_bytes, 1.0)
-            if pct - self.last_emitted_pct >= 0.01 or pct >= 1.0:
+            # 发射条件:pct +1% **或** 距上次 ≥3s — 之前只有 1% 条件,
+            # 大模型(nemotron 1.27GB 的 1%=12.7MB)在慢速网络上十几
+            # 分钟不动一格,字节数也不更新,看起来像"死卡 0%",
+            # 实际下载一直在跑。
+            if pct - self.last_emitted_pct >= 0.01 or pct >= 1.0 \
+                    or now - self._last_emit_t >= 3.0:
                 _emit_event("progress", model_id,
                             downloaded_bytes=self.downloaded_bytes,
                             total_bytes=self.total_bytes,
                             pct=round(pct, 4))
                 self.last_emitted_pct = pct
+                self._last_emit_t = now
 
 
 # tracker 注册表：modelId → _ProgressTracker 实例
@@ -372,9 +387,21 @@ class DownloadTask:
                 tracker.set_total(total)
                 _log(f"模型总大小: {self.model_id} = {total} bytes")
             except Exception as e:
-                _log(f"获取模型大小失败: {self.model_id} - {e}")
-                # 如果拿不到总大小，设 0——进度条不会写（add_bytes 会跳过）
-                tracker.set_total(0)
+                # 镜像模式元数据失败 → 官方源再试一次(hf-mirror 对部分
+                # repo 不代理/丢元数据头)
+                total = 0
+                if endpoint:
+                    try:
+                        info = HfApi().model_info(self.model_id, files_metadata=True)
+                        total = sum(s.size or 0 for s in info.siblings if s.size)
+                        _log(f"镜像元数据失败,官方源取得总大小: {total} bytes")
+                    except Exception:
+                        pass
+                if not total:
+                    _log(f"获取模型大小失败: {self.model_id} - {e}")
+                # 拿不到总大小时设 0 — add_bytes 会改按"每 8MB"发
+                # 字节进度,UI 显示已下载量而不是卡 0%
+                tracker.set_total(total)
 
             try:
                 # snapshot_download 的 tqdm_class 参数：
@@ -382,13 +409,32 @@ class DownloadTask:
                 # 我们的 JsonlProgress.update(n) 把字节累加到全局计数器，
                 # 进度 = _bytes_downloaded / _total_bytes_global（跨文件）。
                 # .close() 不写 100%——等 snapshot_download 返回后统一写。
-                snapshot_download(
-                    repo_id=self.model_id,
-                    local_dir=self.local_path,
-                    cache_dir=os.path.join(MODELS_DIR, ".cache"),
-                    tqdm_class=make_tqdm_class(self.model_id),
-                    endpoint=endpoint,  # None = 官方,镜像开关见 _hf_endpoint
-                )
+                try:
+                    snapshot_download(
+                        repo_id=self.model_id,
+                        local_dir=self.local_path,
+                        cache_dir=os.path.join(MODELS_DIR, ".cache"),
+                        tqdm_class=make_tqdm_class(self.model_id),
+                        endpoint=endpoint,  # None = 官方,镜像开关见 _hf_endpoint
+                    )
+                except DownloadCancelled:
+                    raise
+                except Exception as e:
+                    if endpoint is None or self.cancelled.is_set():
+                        raise
+                    # 镜像下载失败自动回退官方源重试:实测 hf-mirror 对
+                    # 部分 repo(如 mlx-community/nemotron)直接 308 回
+                    # 官方且丢 x-repo-commit 等元数据头,huggingface_hub
+                    # 1.x 报 LocalEntryNotFoundError / 长时间挂起 — 表现
+                    # 为"下载一直卡 0%"。回退用断点续传,已下载分片不浪费。
+                    _log(f"镜像下载失败({type(e).__name__}),回退官方源重试: "
+                         f"{self.model_id}")
+                    snapshot_download(
+                        repo_id=self.model_id,
+                        local_dir=self.local_path,
+                        cache_dir=os.path.join(MODELS_DIR, ".cache"),
+                        tqdm_class=make_tqdm_class(self.model_id),
+                    )
                 # 注:走到这里 = 下载完整结束。即使取消请求恰好在最后
                 # 一个 chunk 之后到达(异常没机会抛),模型也已经下完 —
                 # 正常走 completed 流程(写 .complete),别浪费这次下载。

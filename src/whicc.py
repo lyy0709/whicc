@@ -56,7 +56,7 @@ QWEN3_MODEL = "mlx-community/Qwen3-ASR-0.6B-4bit"  # 中文备用 ASR
 
 from model_state import (  # noqa: E402  (放在常量后避免循环 import)
     read_model_state, write_model_state,
-    resolve_model_id, resolve_models_dir,
+    resolve_model_id, resolve_models_dir, resolve_chinese_model_id,
 )
 
 # 模型预设：不同模型的最佳默认参数
@@ -739,7 +739,8 @@ def main():
     models_dir = args.models_dir or resolve_models_dir(state, MODEL_DIR)
     if state:
         args.model = resolve_model_id(state)
-        print(f"[model-state] current_model={args.model}", flush=True)
+        print(f"[model-state] 启动主模型={args.model} "
+              f"(non_chinese_asr 槽位 > current_model > 默认)", flush=True)
     resolved_model = args.model
     # 之前用老 MODEL_DIR（项目内 ../models/）拼路径，导致 --models-dir
     # 形同虚设。修：用上一步算出的 models_dir（--models-dir > model_state > 兜底）。
@@ -885,8 +886,13 @@ def main():
     pending_switch = None   # "to_qwen3" / "to_nemotron" / None（异步加载中）
     switch_ready = threading.Event()  # 异步加载完成信号
     if resolved_backend == "nemotron":
-        qwen3_local = os.path.join(models_dir, QWEN3_MODEL.replace("/", "--"))
-        qwen3_path = qwen3_local if os.path.isdir(qwen3_local) else QWEN3_MODEL
+        # 中文切换目标:优先 macui 槽位(chinese_asr),未配置回退内置常量
+        # — 之前硬编码 QWEN3_MODEL,UI 的"中文语音识别"槽位选了也不生效。
+        qwen3_model_id = resolve_chinese_model_id(state, QWEN3_MODEL)
+        if qwen3_model_id != QWEN3_MODEL:
+            print(f"[model-state] chinese_asr={qwen3_model_id}", flush=True)
+        qwen3_local = os.path.join(models_dir, qwen3_model_id.replace("/", "--"))
+        qwen3_path = qwen3_local if os.path.isdir(qwen3_local) else qwen3_model_id
         if args.dual_model:
             print(f"预加载 Qwen3 中文备用（双模型模式）: {qwen3_path}", flush=True)
             qwen3_fallback = _get_qwen3_model(qwen3_path)

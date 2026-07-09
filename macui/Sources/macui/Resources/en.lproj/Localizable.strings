@@ -112,6 +112,7 @@
 "Responses（/v1/responses）" = "Responses (/v1/responses)";
 "如 hy-mt2-7b（可手动输入或从右侧列表选择）" = "e.g. hy-mt2-7b (type manually or pick from the list)";
 "下载加速（HF 镜像）" = "Download acceleration (HF mirror)";
+"切换后自动重启识别后端，数秒内生效" = "Recognition backend restarts automatically after switching; takes effect in seconds";
 "下载缓慢时开启，模型改走 hf-mirror.com；海外网络建议保持关闭" = "Enable when downloads are slow; models fetch via hf-mirror.com. Keep off on networks with fast direct access";
 "配置成功后，外置算力不可用时自动使用本地算力" = "After configuration, local fallback kicks in automatically when external fails";
 "保存并重启翻译服务" = "Save and restart translation service";
@@ -178,7 +179,6 @@
 "（未设置）" = "(not set)";
 "本地未下载" = "Not downloaded locally";
 "下载" = "Download";
-"切换后需重启app生效" = "Restart the app for changes to take effect";
 "（推荐）" = "(recommended)";
 "中文 ASR" = "Chinese ASR";
 "非中文 ASR" = "Non-Chinese ASR";
